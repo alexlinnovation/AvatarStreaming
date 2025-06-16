@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Avatar Speak</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    video { width: 640px; height: 480px; background: black; display: block; margin-bottom: 10px; }
+    input { width: 300px; }
+    button { margin: 5px; padding: 5px 10px; }
+  </style>
+</head>
+<body>
+  <h2>Digital Avatar</h2>
+  <video id="video" autoplay muted playsinline></video>
+  <br/>
+  <input type="text" id="text" placeholder="Enter text..." />
+  <button onclick="connect()">Connect</button>
+  <button onclick="sendSpeak()">Speak</button>
+
+  <script>
+    let pc = null;
+    let peerId = null;
+
+    async function connect() {
+        try {
+            pc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { 
+                        urls: 'stun:relay1.expressturn.com:3478',
+                        username: 'efTYZ01RL1QUJ5CFUX',
+                        credential: 'AOZVt0YaAPWCJPbQ'
+                    },
+                    { 
+                        urls: 'turn:relay1.expressturn.com:3478',
+                        username: 'efTYZ01RL1QUJ5CFUX',
+                        credential: 'AOZVt0YaAPWCJPbQ'
+                    }
+                ],
+                iceTransportPolicy: 'all',
+                bundlePolicy: 'balanced',
+                rtcpMuxPolicy: 'require'
+            });
+    
+            // Match working code's transceiver setup
+            pc.addTransceiver('video', { direction: 'recvonly' });
+            pc.addTransceiver('audio', { direction: 'recvonly' });
+    
+            // State handling from working code
+            pc.onconnectionstatechange = () => {
+                console.log("Connection state:", pc.connectionState);
+                if (pc.connectionState === 'connected') {
+                    console.log("✅ Fully connected");
+                }
+                if (pc.connectionState === 'failed') {
+                    console.error("❌ Connection failed");
+                }
+            };
+    
+            // Track handling from working code
+            pc.ontrack = (e) => {
+                const video = document.getElementById("video");
+                if (video && e.streams[0]) {
+                    video.srcObject = e.streams[0];
+                    video.play().catch(e => console.log("Video play error:", e));
+                }
+            };
+    
+            // ICE handling with timeout from working code
+            await pc.setLocalDescription(await pc.createOffer());
+            await new Promise((resolve) => {
+                const t = setTimeout(resolve, 8000);
+                pc.onicecandidate = (ev) => {
+                    if (!ev.candidate) {
+                        clearTimeout(t);
+                        resolve();
+                    }
+                };
+            });
+    
+            const reply = await fetch("/offer", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    sdp: pc.localDescription.sdp,
+                    type: pc.localDescription.type
+                })
+            });
+    
+            const ans = await reply.json();
+            await pc.setRemoteDescription(new RTCSessionDescription(ans));
+            
+        } catch (err) {
+            console.error("Connection error:", err);
+        }
+    }
+    async function sendSpeak() {
+      if (!peerId) {
+        alert("Please connect first!");
+        return;
+      }
+      const text = document.getElementById("text").value;
+      try {
+        await fetch("/speak", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            peer_id: peerId,
+            text: text,
+            voice_style: "neutral"
+          })
+        });
+      } catch (error) {
+        console.error("Error sending text:", error);
+      }
+    }
+  </script>
+</body>
+</html>

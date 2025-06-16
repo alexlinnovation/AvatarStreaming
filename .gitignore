@@ -23,11 +23,8 @@ tmp*
 
 *build
 *.egg-info/
-*.mp4
 
 log/*
-*.mp4
-*.png
 *.jpg
 *.wav
 *.pth

@@ -1,20 +1,28 @@
 import subprocess
-import uuid
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import json, uuid, asyncio
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from typing import Optional, Union
 import os, librosa, numpy as np, torch, pickle, random, math, json
 from stream_pipeline_offline import StreamSDK
 from src.utils import save_temp_file, convert_to_chinese_readable
+from fastapi.staticfiles import StaticFiles
 from kokoro import KPipeline
 import soundfile as sf
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaRelay, MediaPlayer
+from starlette.websockets import WebSocketDisconnect
 
 
 app = FastAPI()
+peers = {} 
 
 DATA_ROOT = "./checkpoints/ditto_trt_Ampere_Plus"
 CFG_PKL = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt.pkl"
 sdk = StreamSDK(CFG_PKL, DATA_ROOT)
+
+sdk_online = StreamSDK(CFG_PKL, DATA_ROOT)
+sdk_online.online_mode = True
 
 def run_pipeline(SDK, audio_path, source_path, output_path, more_kwargs):
     setup_kwargs = more_kwargs.get("setup_kwargs", {})
@@ -145,3 +153,39 @@ async def generate_video_from_text(
         media_type="video/mp4",
         filename=os.path.basename(final_video)
     )
+    
+''' WebSocket handling for real-time video generation can be added here if needed.'''
+### API Goes here ###
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+relay = MediaRelay()
+
+@app.post("/offer")
+async def webrtc_offer(offer: dict):
+    pc = RTCPeerConnection()
+    peer_id = str(uuid.uuid4())
+    peers[peer_id] = pc
+
+    await pc.setRemoteDescription(
+        RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
+    )
+
+    player = MediaPlayer("static/idle.mp4", format="mp4", loop=True)
+    print(f"MediaPlayer created - video: {player.video}, audio: {player.audio}")
+    
+    if player.video:
+        video_track = relay.subscribe(player.video)
+        pc.addTrack(video_track)
+        print("Added video track to peer connection")
+    else:
+        raise Exception("No video track available in media file")
+
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+    print(f"Created answer: {answer.sdp[:100]}...")
+
+    return {
+        "sdp": pc.localDescription.sdp,
+        "type": pc.localDescription.type,
+        "peer_id": peer_id
+    }
