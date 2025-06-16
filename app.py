@@ -171,18 +171,15 @@ async def webrtc_offer(offer: dict):
     )
 
     player = MediaPlayer("static/idle.mp4", format="mp4", loop=True)
-    print(f"MediaPlayer created - video: {player.video}, audio: {player.audio}")
-    
+    print(f"MediaPlayer created for session {peer_id} - video: {player.video}, audio: {player.audio}")
+
     if player.video:
-        video_track = relay.subscribe(player.video)
-        pc.addTrack(video_track)
-        print("Added video track to peer connection")
+        pc.addTrack(player.video)
     else:
         raise Exception("No video track available in media file")
 
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
-    print(f"Created answer: {answer.sdp[:100]}...")
 
     return {
         "sdp": pc.localDescription.sdp,
