@@ -1,9 +1,13 @@
+from fractions import Fraction
+import queue
 import subprocess
+import time
 import json, uuid, asyncio
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from typing import Optional, Union
 import os, librosa, numpy as np, torch, pickle, random, math, json
+import cv2
 from stream_pipeline_online import StreamSDK
 from src.utils import save_temp_file, convert_to_chinese_readable
 from fastapi.staticfiles import StaticFiles
@@ -12,6 +16,7 @@ import soundfile as sf
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay, MediaPlayer
 from starlette.websockets import WebSocketDisconnect
+from aiortc.mediastreams import VideoFrame, MediaStreamError, MediaStreamTrack
 from inference import run  # Assuming inference.py contains the run function
 
 
@@ -20,9 +25,9 @@ peers = {}
 
 DATA_ROOT = "./checkpoints/ditto_trt_Ampere_Plus"
 CFG_PKL = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
-sdk = StreamSDK(CFG_PKL, DATA_ROOT)
+sdk = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(3, 5, 2))
 
-sdk_online = StreamSDK(CFG_PKL, DATA_ROOT)
+sdk_online = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(3, 5, 2))
 sdk_online.online_mode = True
 
 def run_pipeline(SDK, audio_path, source_path, output_path, more_kwargs):
@@ -273,46 +278,125 @@ async def speak(
         raise HTTPException(500, f"Video generation failed: {str(e)}")
 
 
-@app.post("/offer_offline")
+@app.post("/offer_streaming")
 async def offer_offline(offer: dict):
     pc = RTCPeerConnection()
     peer_id = str(uuid.uuid4())
 
-    # Prepare source image and output path
+    # Prepare source image and audio path
     audio_path = "static/audio.wav"
-    src_img = "static/avatar.png"
-    mp4_path = f"/tmp/{uuid.uuid4().hex}_offline.mp4"
+    source_path = "static/idle.mp4"  # Change to your source video
+    
+    # Load audio file
+    audio, sr = librosa.load(audio_path, sr=16000)
+    audio_duration = len(audio) / sr
+    
+    # Create video track
+    video_track = VideoStreamTrack()
+    video_sender = pc.addTrack(video_track)
 
-    # Run offline generation (video only)
-    await asyncio.to_thread(
-        run,
-        sdk,  # assumes preloaded StreamSDK in offline mode
-        audio_path,
-        src_img,
-        mp4_path
-    )
+    # Setup SDK in online mode
+    sdk_online.online_mode = True
+    sdk_online.setup(source_path)  # Use source video instead of static image
+    
+    # Process audio
+    sdk_online.start_processing_audio()
+    sdk_online.process_audio(audio, pad_audio=True)
 
-    # Create media player from generated video
-    player = MediaPlayer(mp4_path, format="mp4")
-
-    video_sender = pc.addTrack(player.video)
-    if player.audio:
-        pc.addTrack(player.audio)
-
+    # Set remote description and create answer
     await pc.setRemoteDescription(
         RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
     )
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
+    # Store peer information
     peers[peer_id] = {
         "pc": pc,
-        "offline_player": player,
-        "video_sender": video_sender,
+        "sdk": sdk_online,
+        "video_track": video_track,
+        "audio_duration": audio_duration,
+        "start_time": time.time()
     }
+
+    # Start streaming task
+    asyncio.create_task(stream_generated_frames(peer_id))
 
     return {
         "sdp": pc.localDescription.sdp,
         "type": pc.localDescription.type,
         "peer_id": peer_id,
     }
+
+async def stream_generated_frames(peer_id: str):
+    if peer_id not in peers:
+        return
+
+    entry = peers[peer_id]
+    sdk = entry["sdk"]
+    video_track = entry["video_track"]
+    audio_duration = entry["audio_duration"]
+    start_time = entry["start_time"]
+    
+    print(f"Starting frame streaming for {peer_id}, expected duration: {audio_duration:.2f}s")
+    
+    try:
+        frame_count = 0
+        last_frame_time = time.time()
+        frame_interval = 1/25  # 25fps
+        
+        while time.time() < start_time + audio_duration + 5.0:  # 5 second buffer
+            try:
+                # Get frame from SDK
+                frame_data, frame_idx, gen_frame_idx = sdk.frame_queue.get(timeout=2.0)
+                frame_count += 1
+                
+                # Convert and send frame
+                frame = cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if frame is not None:
+                    # Log actual frame index being used
+                    print(f"Received frame {frame_count} (source idx: {frame_idx}, gen idx: {gen_frame_idx})")
+                    video_track.put_frame(frame)
+                else:
+                    print("Failed to decode frame")
+                
+                # Maintain frame rate
+                elapsed = time.time() - last_frame_time
+                if elapsed < frame_interval:
+                    await asyncio.sleep(frame_interval - elapsed)
+                last_frame_time = time.time()
+                
+            except queue.Empty:
+                if time.time() > start_time + audio_duration + 2.0:
+                    print("Frame queue timeout - ending stream")
+                    break
+                continue
+            except Exception as e:
+                print(f"Error processing frame: {str(e)}")
+                break
+
+    except Exception as e:
+        print(f"Streaming error: {str(e)}")
+    finally:
+        print(f"Streaming ended - total frames received: {frame_count}")
+        sdk.close()
+        if peer_id in peers:
+            del peers[peer_id]
+
+class VideoStreamTrack(MediaStreamTrack):
+    kind = "video"
+
+    def __init__(self):
+        super().__init__()
+        self._queue = asyncio.Queue()
+
+    def put_frame(self, frame):
+        self._queue.put_nowait(frame)
+
+    async def recv(self):
+        frame = await self._queue.get()
+        pts, time_base = await self.next_timestamp()
+        video_frame = VideoFrame.from_ndarray(frame, format="bgr24")
+        video_frame.pts = pts
+        video_frame.time_base = time_base
+        return video_frame
