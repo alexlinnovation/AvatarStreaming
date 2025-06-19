@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Offline Video</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    video { width: 640px; height: 480px; background: black; display: block; margin-bottom: 10px; }
+    button { margin: 5px; padding: 5px 10px; }
+  </style>
+</head>
+<body>
+  <h2>Offline Generated Avatar</h2>
+  <video id="video" autoplay muted playsinline></video>
+  <br/>
+  <button onclick="connect()">Generate and Play</button>
+
+  <script>
+    let pc = null;
+
+    async function connect() {
+      try {
+        pc = new RTCPeerConnection({
+          iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { 
+                  urls: 'stun:relay1.expressturn.com:3478',
+                  username: 'efTYZ01RL1QUJ5CFUX',
+                  credential: 'AOZVt0YaAPWCJPbQ'
+              },
+              { 
+                  urls: 'turn:relay1.expressturn.com:3478',
+                  username: 'efTYZ01RL1QUJ5CFUX',
+                  credential: 'AOZVt0YaAPWCJPbQ'
+              }
+          ],
+          iceTransportPolicy: 'all',
+          bundlePolicy: 'balanced',
+          rtcpMuxPolicy: 'require'
+        });
+
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+
+        pc.ontrack = (e) => {
+          const video = document.getElementById("video");
+          if (e.streams[0]) {
+            video.srcObject = e.streams[0];
+            video.play();
+          }
+        };
+
+        await pc.setLocalDescription(await pc.createOffer());
+        await new Promise((resolve) => {
+          const timeout = setTimeout(resolve, 8000);
+          pc.onicecandidate = (event) => {
+            if (!event.candidate) {
+              clearTimeout(timeout);
+              resolve();
+            }
+          };
+        });
+
+        const resp = await fetch("/offer_offline", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sdp: pc.localDescription.sdp,
+            type: pc.localDescription.type
+          })
+        });
+
+        const answer = await resp.json();
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      } catch (err) {
+        console.error("Connection error:", err);
+      }
+    }
+  </script>
+</body>
+</html>

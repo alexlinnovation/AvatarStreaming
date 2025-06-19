@@ -1,4 +1,3 @@
-import shutil
 import librosa
 import math
 import os
@@ -6,8 +5,8 @@ import numpy as np
 import random
 import torch
 import pickle
-import soundfile as sf
-from stream_pipeline_online import StreamSDK
+
+from stream_pipeline_offline import StreamSDK
 
 
 def seed_everything(seed):
@@ -23,7 +22,8 @@ def seed_everything(seed):
 def load_pkl(pkl):
     with open(pkl, "rb") as f:
         return pickle.load(f)
-    
+
+
 def run(SDK: StreamSDK, audio_path: str, source_path: str, output_path: str, more_kwargs: str | dict = {}):
 
     if isinstance(more_kwargs, str):
@@ -61,7 +61,7 @@ def run(SDK: StreamSDK, audio_path: str, source_path: str, output_path: str, mor
     os.system(cmd)
 
     print(output_path)
-    
+
 
 if __name__ == "__main__":
     import argparse

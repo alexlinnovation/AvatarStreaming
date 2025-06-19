@@ -210,7 +210,7 @@ class StreamSDK:
         self.cond_idx_start = 0 - len(self.audio_feat)
 
         # ======== Setup Worker Threads ========
-        QUEUE_MAX_SIZE = 100
+        QUEUE_MAX_SIZE = 10000
         # self.QUEUE_TIMEOUT = None
 
         self.worker_exception = None
@@ -266,6 +266,51 @@ class StreamSDK:
             res_frame_rgb = item
             self.writer(res_frame_rgb, fmt="rgb")
             self.writer_pbar.update()
+    
+    # def _writer_worker(self):
+    #     import os
+    #     import imageio
+    #     # Instead of writing 1 final mp4, we now write frame segments to a folder
+    #     self.chunk_output_dir = self.output_path + ".chunks"
+    #     os.makedirs(self.chunk_output_dir, exist_ok=True)
+        
+    #     chunk_frames = []
+    #     chunk_size = 30   # ~1 sec for 30fps
+    #     chunk_index = 0
+
+    #     while not self.stop_event.is_set():
+    #         try:
+    #             item = self.writer_queue.get(timeout=1)
+    #         except queue.Empty:
+    #             continue
+    #         if item is None:
+    #             break
+    #         res_frame_rgb = item
+
+    #         chunk_frames.append(res_frame_rgb)
+    #         self.writer_pbar.update()
+
+    #         if len(chunk_frames) == chunk_size:
+    #             chunk_path = os.path.join(self.chunk_output_dir, f"chunk_{chunk_index:04d}.mp4")
+    #             imageio.mimsave(chunk_path, chunk_frames, fps=30, macro_block_size=None)
+    #             print(f"[Writer] Saved chunk: {chunk_path}")
+    #             chunk_frames = []
+    #             chunk_index += 1
+
+    #     # Flush remaining frames
+    #     if chunk_frames:
+    #         chunk_path = os.path.join(self.chunk_output_dir, f"chunk_{chunk_index:04d}.mp4")
+    #         imageio.mimsave(chunk_path, chunk_frames, fps=30, macro_block_size=None)
+    #         print(f"[Writer] Saved final chunk: {chunk_path}")
+
+    #     # Create a manifest file for streaming
+    #     manifest_path = os.path.join(self.chunk_output_dir, "manifest.txt")
+    #     with open(manifest_path, "w") as f:
+    #         for i in range(chunk_index + 1):
+    #             f.write(f"chunk_{i:04d}.mp4\n")
+
+    #     self.writer_pbar.close()
+
 
     def putback_worker(self):
         try:

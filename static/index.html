@@ -89,6 +89,8 @@
     
             const ans = await reply.json();
             await pc.setRemoteDescription(new RTCSessionDescription(ans));
+            peerId = ans.peer_id;  // ✅ Fix: store peerId for use in /speak
+
             
         } catch (err) {
             console.error("Connection error:", err);
@@ -107,7 +109,7 @@
           body: new URLSearchParams({
             peer_id: peerId,
             text: text,
-            voice_style: "neutral"
+            voice_style: "af_heart"
           })
         });
       } catch (error) {

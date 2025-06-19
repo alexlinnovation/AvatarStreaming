@@ -4,7 +4,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from typing import Optional, Union
 import os, librosa, numpy as np, torch, pickle, random, math, json
-from stream_pipeline_offline import StreamSDK
+from stream_pipeline_online import StreamSDK
 from src.utils import save_temp_file, convert_to_chinese_readable
 from fastapi.staticfiles import StaticFiles
 from kokoro import KPipeline
@@ -12,13 +12,14 @@ import soundfile as sf
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay, MediaPlayer
 from starlette.websockets import WebSocketDisconnect
+from inference import run  # Assuming inference.py contains the run function
 
 
 app = FastAPI()
 peers = {} 
 
 DATA_ROOT = "./checkpoints/ditto_trt_Ampere_Plus"
-CFG_PKL = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt.pkl"
+CFG_PKL = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
 sdk = StreamSDK(CFG_PKL, DATA_ROOT)
 
 sdk_online = StreamSDK(CFG_PKL, DATA_ROOT)
@@ -164,25 +165,154 @@ relay = MediaRelay()
 async def webrtc_offer(offer: dict):
     pc = RTCPeerConnection()
     peer_id = str(uuid.uuid4())
-    peers[peer_id] = pc
+
+    player = MediaPlayer("static/idle.mp4", format="mp4", loop=True)
+    video_sender = pc.addTrack(player.video)        # keep sender handle
+    if player.audio:
+        pc.addTrack(player.audio)
 
     await pc.setRemoteDescription(
         RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
     )
-
-    player = MediaPlayer("static/idle.mp4", format="mp4", loop=True)
-    print(f"MediaPlayer created for session {peer_id} - video: {player.video}, audio: {player.audio}")
-
-    if player.video:
-        pc.addTrack(player.video)
-    else:
-        raise Exception("No video track available in media file")
-
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
+
+    # ── store everything the /speak handler needs ─────────────
+    peers[peer_id] = {
+        "pc": pc,
+        "idle_player": player,
+        "video_sender": video_sender,
+        "src_img": "static/avatar.png"   # change if you use per-session image
+    }
 
     return {
         "sdp": pc.localDescription.sdp,
         "type": pc.localDescription.type,
-        "peer_id": peer_id
+        "peer_id": peer_id,
+    }
+
+@app.post("/speak")
+async def speak(
+    peer_id: str = Form(...),
+    text: str = Form(...),
+    voice_style: str = Form("af_heart")
+):
+    if peer_id not in peers:
+        raise HTTPException(404, "Unknown peer_id")
+
+    entry = peers[peer_id]
+    pc = entry["pc"]
+    sender = entry["video_sender"]
+    src_img = entry["src_img"]
+
+    try:
+        # 1) TTS Generation
+        wav_path = f"/tmp/{uuid.uuid4().hex}.wav"
+        kp = KPipeline(lang_code="a")
+        for _, _, audio in kp(text, voice=voice_style):
+            sf.write(wav_path, audio, 24000)
+            break
+        duration = len(audio) / 24000.0
+
+        # 2) Video Generation (continuous, full audio)
+        mp4_path = wav_path.replace(".wav", ".mp4")
+        tmp_video_path = f"/tmp/{uuid.uuid4().hex}_temp.mp4"
+
+        # Use run_pipeline for correct online-mode batching
+        sdk_online.online_mode = True
+        await asyncio.to_thread(
+            run_pipeline,
+            sdk_online,
+            wav_path,
+            src_img,
+            tmp_video_path,
+            {
+                "setup_kwargs": {},
+                "run_kwargs": {"chunksize": (3, 5, 2)}
+            }
+        )
+
+        # Combine audio and video with ffmpeg
+        subprocess.run([
+            'ffmpeg', '-loglevel', 'error', '-y',
+            '-i', tmp_video_path,
+            '-i', wav_path,
+            '-map', '0:v',
+            '-map', '1:a',
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            mp4_path
+        ], check=True)
+
+        # 3) Create media player
+        talk_player = MediaPlayer(mp4_path, format="mp4")
+        if not talk_player.video:
+            raise HTTPException(500, "Generated video has no video track")
+
+        # Replace video track
+        sender.replaceTrack(talk_player.video)
+        if talk_player.audio:
+            pc.addTrack(talk_player.audio)
+
+        # 4) Cleanup: restore idle after speaking
+        async def cleanup():
+            await asyncio.sleep(duration + 0.5)
+            sender.replaceTrack(entry["idle_player"].video)
+            for f in [wav_path, mp4_path, tmp_video_path]:
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+        asyncio.create_task(cleanup())
+        return {"ok": True, "length": duration}
+
+    except Exception as e:
+        import logging
+        logging.exception(f"Error in speak endpoint: {str(e)}")
+        raise HTTPException(500, f"Video generation failed: {str(e)}")
+
+
+@app.post("/offer_offline")
+async def offer_offline(offer: dict):
+    pc = RTCPeerConnection()
+    peer_id = str(uuid.uuid4())
+
+    # Prepare source image and output path
+    audio_path = "static/audio.wav"
+    src_img = "static/avatar.png"
+    mp4_path = f"/tmp/{uuid.uuid4().hex}_offline.mp4"
+
+    # Run offline generation (video only)
+    await asyncio.to_thread(
+        run,
+        sdk,  # assumes preloaded StreamSDK in offline mode
+        audio_path,
+        src_img,
+        mp4_path
+    )
+
+    # Create media player from generated video
+    player = MediaPlayer(mp4_path, format="mp4")
+
+    video_sender = pc.addTrack(player.video)
+    if player.audio:
+        pc.addTrack(player.audio)
+
+    await pc.setRemoteDescription(
+        RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
+    )
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    peers[peer_id] = {
+        "pc": pc,
+        "offline_player": player,
+        "video_sender": video_sender,
+    }
+
+    return {
+        "sdp": pc.localDescription.sdp,
+        "type": pc.localDescription.type,
+        "peer_id": peer_id,
     }
