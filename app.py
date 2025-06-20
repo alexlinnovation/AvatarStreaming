@@ -17,7 +17,9 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay, MediaPlayer
 from starlette.websockets import WebSocketDisconnect
 from aiortc.mediastreams import VideoFrame, MediaStreamError, MediaStreamTrack
-from inference import run  # Assuming inference.py contains the run function
+from inference import run
+from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor, BitsAndBytesConfig
+from qwen_omni_utils import process_mm_info
 
 
 app = FastAPI()
@@ -29,6 +31,20 @@ sdk = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(3, 5, 2))
 
 sdk_online = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(3, 5, 2))
 sdk_online.online_mode = True
+
+# bnb_config = BitsAndBytesConfig(
+#     load_in_4bit=True,
+#     bnb_4bit_quant_type="nf4",
+#     bnb_4bit_use_double_quant=True,
+#     bnb_4bit_compute_dtype=torch.float16
+# )
+
+# qwenomni_model = Qwen2_5OmniForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-Omni-7B", quantization_config=bnb_config, 
+#                                                                      torch_dtype="auto", device_map="cuda")
+# qwenomni_processor = Qwen2_5OmniProcessor.from_pretrained("Qwen/Qwen2.5-Omni-7B")
+
+qwenomni_model = Qwen2_5OmniForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-Omni-3B", torch_dtype="auto", device_map="cuda")
+qwenomni_processor = Qwen2_5OmniProcessor.from_pretrained("Qwen/Qwen2.5-Omni-3B")
 
 def run_pipeline(SDK, audio_path, source_path, output_path, more_kwargs):
     setup_kwargs = more_kwargs.get("setup_kwargs", {})
@@ -196,6 +212,7 @@ async def webrtc_offer(offer: dict):
         "peer_id": peer_id,
     }
 
+
 @app.post("/speak")
 async def speak(
     peer_id: str = Form(...),
@@ -211,7 +228,6 @@ async def speak(
     src_img = entry["src_img"]
 
     try:
-        # 1) TTS Generation
         wav_path = f"/tmp/{uuid.uuid4().hex}.wav"
         kp = KPipeline(lang_code="a")
         for _, _, audio in kp(text, voice=voice_style):
@@ -219,11 +235,9 @@ async def speak(
             break
         duration = len(audio) / 24000.0
 
-        # 2) Video Generation (continuous, full audio)
         mp4_path = wav_path.replace(".wav", ".mp4")
         tmp_video_path = f"/tmp/{uuid.uuid4().hex}_temp.mp4"
 
-        # Use run_pipeline for correct online-mode batching
         sdk_online.online_mode = True
         await asyncio.to_thread(
             run_pipeline,
@@ -236,8 +250,6 @@ async def speak(
                 "run_kwargs": {"chunksize": (3, 5, 2)}
             }
         )
-
-        # Combine audio and video with ffmpeg
         subprocess.run([
             'ffmpeg', '-loglevel', 'error', '-y',
             '-i', tmp_video_path,
@@ -249,17 +261,14 @@ async def speak(
             mp4_path
         ], check=True)
 
-        # 3) Create media player
         talk_player = MediaPlayer(mp4_path, format="mp4")
         if not talk_player.video:
             raise HTTPException(500, "Generated video has no video track")
 
-        # Replace video track
         sender.replaceTrack(talk_player.video)
         if talk_player.audio:
             pc.addTrack(talk_player.audio)
 
-        # 4) Cleanup: restore idle after speaking
         async def cleanup():
             await asyncio.sleep(duration + 0.5)
             sender.replaceTrack(entry["idle_player"].video)
@@ -278,125 +287,59 @@ async def speak(
         raise HTTPException(500, f"Video generation failed: {str(e)}")
 
 
-@app.post("/offer_streaming")
-async def offer_offline(offer: dict):
-    pc = RTCPeerConnection()
-    peer_id = str(uuid.uuid4())
-
-    # Prepare source image and audio path
-    audio_path = "static/audio.wav"
-    source_path = "static/idle.mp4"  # Change to your source video
+@app.post("/qwen-stt")
+async def generate_qwen_audio():
+    #@TODO: Implement ST from frontend instead of hardcoded prompt
+    prompt = "Tell me about the solar system in simple terms."
     
-    # Load audio file
-    audio, sr = librosa.load(audio_path, sr=16000)
-    audio_duration = len(audio) / sr
-    
-    # Create video track
-    video_track = VideoStreamTrack()
-    video_sender = pc.addTrack(video_track)
+    conversation = [
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt}
+            ],
+        },
+        # {
+        #     "role": "user",
+        #     "content": [
+        #         {"type": "video", "video": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-Omni/draw.mp4"},
+        #     ],
+        # },
+    ]
 
-    # Setup SDK in online mode
-    sdk_online.online_mode = True
-    sdk_online.setup(source_path)  # Use source video instead of static image
-    
-    # Process audio
-    sdk_online.start_processing_audio()
-    sdk_online.process_audio(audio, pad_audio=True)
+    USE_AUDIO_IN_VIDEO = True
 
-    # Set remote description and create answer
-    await pc.setRemoteDescription(
-        RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
+    # Format input for processor
+    text = qwenomni_processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+    audios, images, videos = process_mm_info(conversation, use_audio_in_video=USE_AUDIO_IN_VIDEO)
+    inputs = qwenomni_processor(
+        text=text,
+        audio=audios,
+        images=images,
+        videos=videos,
+        return_tensors="pt",
+        padding=True,
+        use_audio_in_video=USE_AUDIO_IN_VIDEO
     )
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
+    inputs = inputs.to(qwenomni_model.device).to(qwenomni_model.dtype)
 
-    # Store peer information
-    peers[peer_id] = {
-        "pc": pc,
-        "sdk": sdk_online,
-        "video_track": video_track,
-        "audio_duration": audio_duration,
-        "start_time": time.time()
-    }
+    # Generate output
+    text_ids, audio = qwenomni_model.generate(**inputs, use_audio_in_video=USE_AUDIO_IN_VIDEO)
 
-    # Start streaming task
-    asyncio.create_task(stream_generated_frames(peer_id))
+    # Decode and save output
+    response_text = qwenomni_processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+    print(f"Qwen response: {response_text[0]}")
+    audio_out = f"/tmp/{uuid.uuid4().hex}.wav"
+    sf.write(audio_out, audio.reshape(-1).detach().cpu().numpy(), samplerate=24000)
 
-    return {
-        "sdp": pc.localDescription.sdp,
-        "type": pc.localDescription.type,
-        "peer_id": peer_id,
-    }
-
-async def stream_generated_frames(peer_id: str):
-    if peer_id not in peers:
-        return
-
-    entry = peers[peer_id]
-    sdk = entry["sdk"]
-    video_track = entry["video_track"]
-    audio_duration = entry["audio_duration"]
-    start_time = entry["start_time"]
-    
-    print(f"Starting frame streaming for {peer_id}, expected duration: {audio_duration:.2f}s")
-    
-    try:
-        frame_count = 0
-        last_frame_time = time.time()
-        frame_interval = 1/25  # 25fps
-        
-        while time.time() < start_time + audio_duration + 5.0:  # 5 second buffer
-            try:
-                # Get frame from SDK
-                frame_data, frame_idx, gen_frame_idx = sdk.frame_queue.get(timeout=2.0)
-                frame_count += 1
-                
-                # Convert and send frame
-                frame = cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), cv2.IMREAD_COLOR)
-                if frame is not None:
-                    # Log actual frame index being used
-                    print(f"Received frame {frame_count} (source idx: {frame_idx}, gen idx: {gen_frame_idx})")
-                    video_track.put_frame(frame)
-                else:
-                    print("Failed to decode frame")
-                
-                # Maintain frame rate
-                elapsed = time.time() - last_frame_time
-                if elapsed < frame_interval:
-                    await asyncio.sleep(frame_interval - elapsed)
-                last_frame_time = time.time()
-                
-            except queue.Empty:
-                if time.time() > start_time + audio_duration + 2.0:
-                    print("Frame queue timeout - ending stream")
-                    break
-                continue
-            except Exception as e:
-                print(f"Error processing frame: {str(e)}")
-                break
-
-    except Exception as e:
-        print(f"Streaming error: {str(e)}")
-    finally:
-        print(f"Streaming ended - total frames received: {frame_count}")
-        sdk.close()
-        if peer_id in peers:
-            del peers[peer_id]
-
-class VideoStreamTrack(MediaStreamTrack):
-    kind = "video"
-
-    def __init__(self):
-        super().__init__()
-        self._queue = asyncio.Queue()
-
-    def put_frame(self, frame):
-        self._queue.put_nowait(frame)
-
-    async def recv(self):
-        frame = await self._queue.get()
-        pts, time_base = await self.next_timestamp()
-        video_frame = VideoFrame.from_ndarray(frame, format="bgr24")
-        video_frame.pts = pts
-        video_frame.time_base = time_base
-        return video_frame
+    return FileResponse(
+        path=audio_out,
+        media_type="audio/wav",
+        filename="qwen_response.wav"
+    )
