@@ -1,80 +1,117 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Offline Video</title>
-  <style>
-    body { font-family: sans-serif; padding: 20px; }
-    video { width: 640px; height: 480px; background: black; display: block; margin-bottom: 10px; }
-    button { margin: 5px; padding: 5px 10px; }
-  </style>
+    <title>Avatar WebRTC</title>
+    <style>
+        #videoContainer {
+            width: 640px;
+            height: 480px;
+            border: 1px solid #ccc;
+            margin: 20px auto;
+        }
+        #videoElement {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        #controls {
+            text-align: center;
+            margin: 20px;
+        }
+        textarea {
+            width: 80%;
+            height: 100px;
+            margin-bottom: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+        }
+    </style>
 </head>
 <body>
-  <h2>Offline Generated Avatar</h2>
-  <video id="video" autoplay muted playsinline></video>
-  <br/>
-  <button onclick="connect()">Generate and Play</button>
+    <div id="videoContainer">
+        <img id="videoElement" />
+    </div>
+    
+    <div id="controls">
+        <textarea id="text" placeholder="Enter text to speak..."></textarea><br>
+        <button onclick="sendSpeak()">Speak</button>
+    </div>
 
-  <script>
-    let pc = null;
-
-    async function connect() {
-      try {
-        pc = new RTCPeerConnection({
-          iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { 
-                  urls: 'stun:relay1.expressturn.com:3478',
-                  username: 'efTYZ01RL1QUJ5CFUX',
-                  credential: 'AOZVt0YaAPWCJPbQ'
-              },
-              { 
-                  urls: 'turn:relay1.expressturn.com:3478',
-                  username: 'efTYZ01RL1QUJ5CFUX',
-                  credential: 'AOZVt0YaAPWCJPbQ'
-              }
-          ],
-          iceTransportPolicy: 'all',
-          bundlePolicy: 'balanced',
-          rtcpMuxPolicy: 'require'
-        });
-
-        pc.addTransceiver('video', { direction: 'recvonly' });
-        pc.addTransceiver('audio', { direction: 'recvonly' });
-
-        pc.ontrack = (e) => {
-          const video = document.getElementById("video");
-          if (e.streams[0]) {
-            video.srcObject = e.streams[0];
-            video.play();
-          }
-        };
-
-        await pc.setLocalDescription(await pc.createOffer());
-        await new Promise((resolve) => {
-          const timeout = setTimeout(resolve, 8000);
-          pc.onicecandidate = (event) => {
-            if (!event.candidate) {
-              clearTimeout(timeout);
-              resolve();
+    <script>
+        const sessionId = "{{ sessionid }}";
+        const videoElement = document.getElementById('videoElement');
+        let socket = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        
+        function connectWebSocket() {
+            // Use the websocket_url provided by the server
+            const wsUrl = "{{ websocket_url }}";
+            socket = new WebSocket(wsUrl);
+            
+            socket.onopen = function() {
+                console.log('WebSocket connected');
+                reconnectAttempts = 0;
+            };
+            
+            socket.onmessage = function(event) {
+                if (event.data instanceof Blob) {
+                    const url = URL.createObjectURL(event.data);
+                    videoElement.onload = () => {
+                        // Release previous blob URL to prevent memory leaks
+                        if (videoElement.src.startsWith('blob:')) {
+                            URL.revokeObjectURL(videoElement.src);
+                        }
+                    };
+                    videoElement.src = url;
+                }
+            };
+            
+            socket.onclose = function() {
+                console.log('WebSocket disconnected');
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    const delay = Math.min(1000 * reconnectAttempts, 5000);
+                    console.log(`Reconnecting in ${delay}ms...`);
+                    setTimeout(connectWebSocket, delay);
+                }
+            };
+            
+            socket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                socket.close();
+            };
+        }
+        
+        async function sendSpeak() {
+            const text = document.getElementById("text").value;
+            if (!text) return;
+            
+            try {
+                const response = await fetch("/speak", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: new URLSearchParams({ 
+                        sessionid: sessionId, 
+                        text, 
+                        voice_style: "af_heart", 
+                        speed: "1.1" 
+                    })
+                });
+                
+                const result = await response.json();
+                if (result.status !== "ok") {
+                    console.error("Error:", result.message || "Unknown error");
+                }
+            } catch (e) { 
+                console.error("Error sending text:", e); 
             }
-          };
-        });
-
-        const resp = await fetch("/offer_streaming", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sdp: pc.localDescription.sdp,
-            type: pc.localDescription.type
-          })
-        });
-
-        const answer = await resp.json();
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
-      } catch (err) {
-        console.error("Connection error:", err);
-      }
-    }
-  </script>
+        }
+        
+        // Initialize WebSocket connection when page loads
+        window.addEventListener('load', connectWebSocket);
+    </script>
 </body>
 </html>
