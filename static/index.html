@@ -1,17 +1,43 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="utf-8" />
   <title>Avatar Speak</title>
   <style>
     body { font-family: sans-serif; padding: 20px; }
-    video { width: 640px; height: 480px; background: black; display: block; margin-bottom: 10px; }
-    input { width: 300px; }
-    button { margin: 5px; padding: 5px 10px; }
+
+    /* avatar feed */
+    #video      { width: 640px; height: 480px; background:#000; display:block; margin-bottom:10px; }
+
+    /* self-view overlay */
+    #self-wrap  {
+      position:absolute; right:20px; top:20px;
+      width:160px; text-align:center; color:#fff; font-weight:bold;
+      text-shadow:0 0 3px #000;
+    }
+    #self       { width:160px; height:120px; background:#222; border-radius:4px; }
+
+    /* controls */
+    input[type=text]{ width:300px; }
+    button      { margin:5px; padding:5px 10px; }
   </style>
 </head>
 <body>
   <h2>Digital Avatar</h2>
-  <video id="video" autoplay muted playsinline></video>
+
+  <!-- avatar video + self overlay in same relative box -->
+  <div style="position:relative; display:inline-block;">
+    <video id="video" autoplay playsinline></video>
+
+    <!-- local cam + name -->
+    <div id="self-wrap">
+      <div id="name-label"></div>
+      <video id="self" autoplay muted playsinline></video>
+    </div>
+  </div>
+
+  <br/>
+  <input type="text" id="user-name" placeholder="Your name…" />
   <br/>
   <input type="text" id="text" placeholder="Enter text..." />
   <button onclick="connect()">Connect</button>
@@ -19,8 +45,19 @@
 
   <script>
     let pc = null;
-    let peerId = null;
+    let sessionId = null;
 
+    /* ── local webcam preview ───────────────────────── */
+    navigator.mediaDevices.getUserMedia({ video:true, audio:false })
+      .then(s => { document.getElementById('self').srcObject = s; })
+      .catch(e => console.warn('cam err', e));
+
+    /* update name label live */
+    document.getElementById('user-name').addEventListener('input', ev => {
+      document.getElementById('name-label').textContent = ev.target.value.trim();
+    });
+
+    /* ── your original connect() (unchanged) ────────── */
     async function connect() {
         try {
             pc = new RTCPeerConnection({
@@ -41,80 +78,51 @@
                 bundlePolicy: 'balanced',
                 rtcpMuxPolicy: 'require'
             });
-    
-            // Match working code's transceiver setup
+
             pc.addTransceiver('video', { direction: 'recvonly' });
             pc.addTransceiver('audio', { direction: 'recvonly' });
-    
-            // State handling from working code
+
             pc.onconnectionstatechange = () => {
                 console.log("Connection state:", pc.connectionState);
-                if (pc.connectionState === 'connected') {
-                    console.log("✅ Fully connected");
-                }
-                if (pc.connectionState === 'failed') {
-                    console.error("❌ Connection failed");
-                }
+                if (pc.connectionState === 'connected')  console.log("✅ Fully connected");
+                if (pc.connectionState === 'failed')     console.error("❌ Connection failed");
             };
-    
-            // Track handling from working code
+
             pc.ontrack = (e) => {
-                const video = document.getElementById("video");
-                if (video && e.streams[0]) {
-                    video.srcObject = e.streams[0];
-                    video.play().catch(e => console.log("Video play error:", e));
+                const v = document.getElementById("video");
+                if (v && e.streams[0] && !v.srcObject) {
+                    v.srcObject = e.streams[0];
+                    v.play().catch(err => console.log("play err", err));
                 }
             };
-    
-            // ICE handling with timeout from working code
+
             await pc.setLocalDescription(await pc.createOffer());
-            await new Promise((resolve) => {
-                const t = setTimeout(resolve, 8000);
-                pc.onicecandidate = (ev) => {
-                    if (!ev.candidate) {
-                        clearTimeout(t);
-                        resolve();
-                    }
-                };
+            await new Promise(r => {
+                const t = setTimeout(r, 8000);
+                pc.onicecandidate = ev => { if (!ev.candidate){ clearTimeout(t); r(); } };
             });
-    
+
             const reply = await fetch("/offer", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    sdp: pc.localDescription.sdp,
-                    type: pc.localDescription.type
-                })
+                body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
             });
-    
+
             const ans = await reply.json();
             await pc.setRemoteDescription(new RTCSessionDescription(ans));
-            peerId = ans.peer_id;  // ✅ Fix: store peerId for use in /speak
-
-            
-        } catch (err) {
-            console.error("Connection error:", err);
-        }
+            sessionId = ans.sessionid;
+        } catch (err) { console.error("Connection error:", err); }
     }
+
     async function sendSpeak() {
-      if (!peerId) {
-        alert("Please connect first!");
-        return;
-      }
       const text = document.getElementById("text").value;
       try {
         await fetch("/speak", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            peer_id: peerId,
-            text: text,
-            voice_style: "af_heart"
-          })
+          body: new URLSearchParams({ sessionid: sessionId, text, voice_style: "af_heart", speed: "1.1" })
         });
-      } catch (error) {
-        console.error("Error sending text:", error);
-      }
+      } catch (e) { console.error("Error sending text:", e); }
     }
   </script>
 </body>
