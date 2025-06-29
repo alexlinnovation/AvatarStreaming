@@ -19,9 +19,9 @@ CFG_PKL   = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
 DATA_ROOT = "./checkpoints/ditto_trt_Ampere_Plus"
 SRC_IMG   = "static/avatar.png"
 IDLE_FILE = "static/idle.mp3"
-TALK_FILE = "static/audio.mp3"
 BYTES_PER_FRAME = 640      # fixed for this model
 FPS   = 25
+IDLE_AUDIO = np.zeros(16000, dtype=np.float32)  # 1-s silence
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -40,8 +40,6 @@ def load_16k(path: str) -> np.ndarray:
         data = (data[base] * (1 - frac) + data[nxt] * frac).astype(np.float32)
     return data
 
-SPEECH = load_16k(TALK_FILE)                    # demo utterance
-IDLE_AUDIO = np.zeros(16000, dtype=np.float32)  # 1-s silence
 
 def new_sdk() -> StreamSDK:
     sdk = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(2, 4, 2))
@@ -123,6 +121,9 @@ async def speak(sessionid: str = Form(...)):
     player       = sess["player"]
     present      = sess["present"]
     split_len    = sess["split_len"]
+    
+    TALK_FILE = "static/audio.mp3"
+    SPEECH = load_16k(TALK_FILE) # dummy audio
 
     # stop any running speech
     prev_stop = sess.get("speech_stop")
