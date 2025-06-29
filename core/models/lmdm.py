@@ -45,7 +45,7 @@ class LMDM:
         alphas = 1.0 - betas
         self.alphas_cumprod = torch.cumprod(alphas, axis=0).cpu().numpy()
 
-    def _setup_np(self, sampling_timesteps=50):
+    def _setup_np(self, sampling_timesteps=80):
         if self.sampling_timesteps == sampling_timesteps:
             return
         

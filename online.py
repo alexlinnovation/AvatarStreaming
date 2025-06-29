@@ -2,186 +2,166 @@
 online.py – FastAPI + WebRTC avatar streamer
 • POST /offer → idle.mp3 loops continuously
 • POST /speak → pauses idle, plays audio.mp3 once, resumes idle
-Run: uvicorn online:app --host 0.0.0.0 --port 8000 --reload
 """
-
-import asyncio, threading, time, uuid, queue
+import threading, time, uuid, queue
 from fractions import Fraction
-
+import torch
 import cv2, av, numpy as np, soundfile as sf
 from fastapi import FastAPI, Form
 from fastapi.staticfiles import StaticFiles
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from aiortc import RTCPeerConnection, RTCSessionDescription
 
 from stream_pipeline_online import StreamSDK
+from webrtc import HumanPlayer, AUDIO_FRAME_SAMP
 
-# ─── paths ────────────────────────────────────────────
+# ─── config & paths ───────────────────────────────────────────────────
 CFG_PKL   = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
 DATA_ROOT = "./checkpoints/ditto_trt_Ampere_Plus"
 SRC_IMG   = "static/avatar.png"
 IDLE_FILE = "static/idle.mp3"
 TALK_FILE = "static/audio.mp3"
+BYTES_PER_FRAME = 640      # fixed for this model
+FPS   = 25
 
-# ─── FastAPI ──────────────────────────────────────────
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ─── StreamSDK shared instance ───────────────────────
-sdk = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(3, 5, 2))
-sdk.online_mode = True
-sdk.setup(SRC_IMG)
-
-FPS             = 25
-FRAME_INTERVAL  = 1.0 / FPS
-BYTES_PER_FRAME = 640
-PRESENT         = sdk.chunk_size[1] * BYTES_PER_FRAME
-SPLIT_LEN       = int(sum(sdk.chunk_size) * BYTES_PER_FRAME) + 80
-
-# ─── audio helpers ───────────────────────────────────
+# ─── helpers ──────────────────────────────────────────────────────────
 def load_16k(path: str) -> np.ndarray:
     data, sr = sf.read(path, dtype="float32")
     if data.ndim > 1:
         data = data.mean(axis=1)
-    if sr == 16000:
-        return data
-    # linear resample to 16 kHz
-    new_len = int(len(data) * 16000 / sr)
-    idx     = np.linspace(0, len(data)-1, new_len, dtype=np.float32)
-    base    = idx.astype(np.int32)
-    frac    = idx - base
-    nxt     = np.clip(base+1, 0, len(data)-1)
-    return (data[base]*(1-frac) + data[nxt]*frac).astype(np.float32)
+    if sr != 16000:
+        new_len = int(len(data) * 16000 / sr)
+        idx  = np.linspace(0, len(data) - 1, new_len, dtype=np.float32)
+        base = idx.astype(np.int32)
+        frac = idx - base
+        nxt  = np.clip(base + 1, 0, len(data) - 1)
+        data = (data[base] * (1 - frac) + data[nxt] * frac).astype(np.float32)
+    return data
 
-# ─── NEW: simple audio track for WebRTC ─────────────
-class AudioTrack(MediaStreamTrack):
-    kind = "audio"
-    def __init__(self, samples: np.ndarray, sr: int = 16000):
-        super().__init__()              # don't touch video logic
-        self.samples = (samples * 32767).astype(np.int16).tobytes()
-        self.sample_rate = sr
-        self.pos = 0
-        self.frame_size = 960           # 20 ms @48 kHz after browser resample
-    async def recv(self):
-        # slice out one packet of bytes
-        start = self.pos
-        end   = start + self.frame_size * 2
-        chunk = self.samples[start*2:end*2]
-        if not chunk:
-            # once speech is done, return silence
-            chunk = b"\x00" * (self.frame_size*2)
-        self.pos += self.frame_size
-        frame = av.AudioFrame(format="s16", layout="mono", samples=self.frame_size)
-        frame.planes[0].update(chunk)
-        frame.sample_rate = 48000
-        frame.pts = self.pos
-        frame.time_base = Fraction(1, 48000)
-        return frame
-# ────────────────────────────────────────────────────
+SPEECH = load_16k(TALK_FILE)                    # demo utterance
+IDLE_AUDIO = np.zeros(16000, dtype=np.float32)  # 1-s silence
 
-# load both idle & speak into memory once
-idle_audio  = load_16k(IDLE_FILE)[:3*16000]    # 3 s slice
-speak_audio = load_16k(TALK_FILE)
+def new_sdk() -> StreamSDK:
+    sdk = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(2, 4, 2))
+    sdk.online_mode = True
+    sdk.setup(SRC_IMG)
+    return sdk
 
-# pre-slice idle chunk
-idle_slice = idle_audio[:SPLIT_LEN] \
-    if len(idle_audio) >= SPLIT_LEN else \
-    np.pad(idle_audio, (0, SPLIT_LEN - len(idle_audio)), 'constant')
+def _drain(q: queue.Queue):
+    while True:
+        try: q.get_nowait()
+        except queue.Empty: return
 
-def push_chunk(chunk: np.ndarray):
-    sdk.start_processing_audio()
-    sdk.process_audio_chunk(chunk)
-    sdk.end_processing_audio()
+sessions: dict[str, dict] = {}
 
-# ─── session state ───────────────────────────────────
-sessions = {}   # sid → dict(video_q, idle_evt, kill_evt)
-
-def idle_feeder(idle_evt: threading.Event, kill_evt: threading.Event):
-    while not kill_evt.is_set():
+# ─── background workers ──────────────────────────────────────────────
+def idle_feeder(sdk: StreamSDK, idle_evt: threading.Event, stop_evt: threading.Event, idle_slice: np.ndarray):
+    while not stop_evt.is_set():
         idle_evt.wait()
-        if kill_evt.is_set():
+        if stop_evt.is_set():
             break
-        sdk.interrupt()
-        push_chunk(idle_slice)
+        sdk.interrupt()                # reset for idle
+        sdk.start_processing_audio()
+        sdk.process_audio_chunk(np.zeros(sdk.split_len, dtype=np.float32))
+        sdk.end_processing_audio()
+        torch.cuda.synchronize()
 
-def frame_collector(sid: str, kill_evt: threading.Event):
-    q = sessions[sid]["video_q"]
-    while not kill_evt.is_set():
-        if sdk.has_pending_frames():
-            buf, *_ = sdk.frame_queue.get()
-            q.put(buf)
-        else:
-            time.sleep(0.004)
+def frame_collector(sdk: StreamSDK, player: HumanPlayer, stop_evt: threading.Event):
+    while not stop_evt.is_set():
+        try:
+            buf, *_ = sdk.frame_queue.get(timeout=0.25)
+            player.push_video(buf)
+        except queue.Empty:
+            continue
 
-class AvatarVideo(MediaStreamTrack):
-    kind = "video"
-    def __init__(self, sid):
-        super().__init__(); self.sid=sid; self.t0=time.monotonic(); self.last=0.0
-    async def recv(self):
-        q = sessions[self.sid]["video_q"]
-        while q.empty():
-            await asyncio.sleep(0.005)
-        img_bgr = cv2.imdecode(np.frombuffer(q.get(), np.uint8), cv2.IMREAD_COLOR)
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        frame = av.VideoFrame.from_ndarray(img_rgb, format="rgb24")
-        now = time.monotonic()-self.t0
-        gap = FRAME_INTERVAL-(now-self.last)
-        if gap>0:
-            await asyncio.sleep(gap)
-            now=time.monotonic()-self.t0
-        frame.pts, frame.time_base = int(now*90000), Fraction(1,90000)
-        self.last=now
-        return frame
-
-# ─── POST /offer ─────────────────────────────────────
+# ─── Endpoints ─────────────────────────────────────────────────────
 @app.post("/offer")
 async def offer(offer: dict):
     sid = str(uuid.uuid4())
-    idle_evt, kill_evt = threading.Event(), threading.Event()
-    idle_evt.set()
-    sessions[sid] = {"video_q": queue.Queue(), "idle_evt": idle_evt, "kill_evt": kill_evt}
+    idle_evt = threading.Event();  idle_evt.set()
+    kill_evt = threading.Event()
+    sdk = new_sdk()
 
-    threading.Thread(target=idle_feeder,   args=(idle_evt, kill_evt), daemon=True).start()
-    threading.Thread(target=frame_collector, args=(sid,kill_evt), daemon=True).start()
+    present    = sdk.chunk_size[1] * BYTES_PER_FRAME
+    split_len  = int(sum(sdk.chunk_size) * BYTES_PER_FRAME) + 80
+    idle_slice = np.pad(IDLE_AUDIO[:split_len], (0, max(0, split_len - len(IDLE_AUDIO))), 'constant')
+
+    player = HumanPlayer()
+    sessions[sid] = {
+        "sdk": sdk,
+        "idle_evt": idle_evt,
+        "kill_evt": kill_evt,
+        "player": player,
+        "speech_stop": None,
+        "speech_thread": None,
+        "present": present,
+        "split_len": split_len
+    }
+
+    threading.Thread(target=idle_feeder, args=(sdk, idle_evt, kill_evt, idle_slice), daemon=True).start()
+    threading.Thread(target=frame_collector, args=(sdk, player, kill_evt), daemon=True).start()
 
     pc = RTCPeerConnection()
-    pc.addTrack(AvatarVideo(sid))
-    # ─── NEW: attach audio track here ───────────────
-    pc.addTrack(AudioTrack(speak_audio, sr=16000))
-    # ──────────────────────────────────────────────────
+    pc.addTrack(player.video)
+    pc.addTrack(player.audio)
 
     await pc.setRemoteDescription(RTCSessionDescription(**offer))
     await pc.setLocalDescription(await pc.createAnswer())
-    return {
-        "sdp": pc.localDescription.sdp,
-        "type": pc.localDescription.type,
-        "sessionid": sid
-    }
+    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type, "sessionid": sid}
 
-# ─── POST /speak ─────────────────────────────────────
+
 @app.post("/speak")
 async def speak(sessionid: str = Form(...)):
     sess = sessions.get(sessionid)
-    if not sess:
+    if not sess: 
         return {"error": "unknown session"}
 
-    idle_evt = sess["idle_evt"]
+    sdk          = sess["sdk"]
+    idle_evt     = sess["idle_evt"]
+    player       = sess["player"]
+    present      = sess["present"]
+    split_len    = sess["split_len"]
 
-    def speech():
+    # stop any running speech
+    prev_stop = sess.get("speech_stop")
+    prev_thr  = sess.get("speech_thread")
+    if prev_thr and prev_thr.is_alive():
+        prev_stop.set()
+        prev_thr.join(timeout=0.2)
+
+    stop_evt = threading.Event()
+    sess["speech_stop"]   = stop_evt
+    sess["speech_thread"] = None
+
+    def speech_worker():
         idle_evt.clear()
-        # only clear these three queues—everything else unchanged
-        sdk.hubert_features_queue.queue.clear()
-        sdk.audio2motion_queue.queue.clear()
-        sdk.motion_stitch_queue.queue.clear()
+        for q in (sdk.hubert_features_queue, sdk.audio2motion_queue, sdk.motion_stitch_queue):
+            _drain(q)
+        _drain(sdk.frame_queue)
+
+        sdk.start_processing_audio()
 
         pos = 0
-        while pos < len(speak_audio):
-            chunk = speak_audio[pos:pos+SPLIT_LEN]
-            if len(chunk) < SPLIT_LEN:
-                chunk = np.pad(chunk, (0, SPLIT_LEN-len(chunk)), "constant")
-            push_chunk(chunk)
-            pos += PRESENT
+        while pos < len(SPEECH) and not stop_evt.is_set():
+            slice_f32 = SPEECH[pos:pos + AUDIO_FRAME_SAMP]
+            if len(slice_f32) < AUDIO_FRAME_SAMP:
+                slice_f32 = np.pad(slice_f32, (0, AUDIO_FRAME_SAMP - len(slice_f32)))
+            player.push_audio((slice_f32 * 32767).astype(np.int16))
 
+            if pos % present == 0:
+                chunk = SPEECH[pos:pos + split_len]
+                if len(chunk) < split_len:
+                    chunk = np.pad(chunk, (0, split_len - len(chunk)))
+                sdk.process_audio_chunk(chunk)
+            pos += AUDIO_FRAME_SAMP
+            time.sleep(0.020)
+
+        sdk.end_processing_audio()
         idle_evt.set()
 
-    threading.Thread(target=speech, daemon=True).start()
+    t = threading.Thread(target=speech_worker, daemon=True)
+    sess["speech_thread"] = t
+    t.start()
     return {"status": "playing"}

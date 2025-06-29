@@ -77,7 +77,7 @@ class Audio2Motion:
         overlap_v2=10,
         fix_kp_cond=0,
         fix_kp_cond_dim=None,
-        sampling_timesteps=50,
+        sampling_timesteps=80,
         online_mode=False,
         v_min_max_for_clip=None,
         smo_k_d=3,

@@ -34,7 +34,7 @@ class Wav2Feat:
         audio, 
         sr=16000, 
         norm_mean_std=None,   # for s2g
-        chunksize=(3, 5, 2),   # for hubert
+        chunksize=(4, 8, 3),   # for hubert
     ):
         if self.w2f_type == "hubert":
             feat = self.w2f(audio, chunksize=chunksize)
@@ -49,7 +49,7 @@ class Wav2Feat:
         audio, 
         sr=16000, 
         norm_mean_std=None,   # for s2g
-        chunksize=(3, 5, 2),
+        chunksize=(4, 8, 3),
     ):
         # for offline
         if self.w2f_type == "hubert":
@@ -69,7 +69,7 @@ class Wav2FeatHubert:
         self.hubert = HubertStreaming(**hubert_cfg)
 
     #@profile("Wav2Feat.__call__")
-    def __call__(self, audio_chunk, chunksize=(3, 5, 2)):
+    def __call__(self, audio_chunk, chunksize=(4, 8, 3)):
         """
         audio_chunk: int(sum(chunksize) * 0.04 * 16000) + 80    # 6480
         """
@@ -81,7 +81,7 @@ class Wav2FeatHubert:
         valid_feat = valid_encoding.reshape(chunksize[1], 2, 1024).mean(1)    # [5, 1024]
         return valid_feat
 
-    def wav2feat(self, audio, sr, chunksize=(3, 5, 2)):
+    def wav2feat(self, audio, sr, chunksize=(4, 8, 3)):
         # for offline
         if sr != 16000:
             audio_16k = librosa.resample(audio, orig_sr=sr, target_sr=16000)

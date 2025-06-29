@@ -227,7 +227,7 @@ class StreamSDK:
         self.overlap_v2 = kwargs.get("overlap_v2", 10)
         self.fix_kp_cond = kwargs.get("fix_kp_cond", 0)
         self.fix_kp_cond_dim = kwargs.get("fix_kp_cond_dim", None)  # [ds,de]
-        self.sampling_timesteps = kwargs.get("sampling_timesteps", 50)
+        self.sampling_timesteps = kwargs.get("sampling_timesteps", 80)
         self.online_mode = kwargs.get("online_mode", False)
         self.v_min_max_for_clip = kwargs.get('v_min_max_for_clip', None)
         self.smo_k_d = kwargs.get("smo_k_d", 3)
