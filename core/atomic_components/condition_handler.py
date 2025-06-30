@@ -31,7 +31,7 @@ class ConditionHandler:
     """
     def __init__(
         self,
-        use_emo=True,
+        use_emo=False,
         use_sc=True,
         use_eye_open=True,
         use_eye_ball=True,

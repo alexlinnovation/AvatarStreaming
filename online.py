@@ -6,11 +6,10 @@ online.py – FastAPI + WebRTC avatar streamer
 import threading, time, uuid, queue
 from fractions import Fraction
 import torch
-import cv2, av, numpy as np, soundfile as sf
+import cv2, numpy as np, soundfile as sf
 from fastapi import FastAPI, Form
 from fastapi.staticfiles import StaticFiles
 from aiortc import RTCPeerConnection, RTCSessionDescription
-
 from stream_pipeline_online import StreamSDK
 from webrtc import HumanPlayer, AUDIO_FRAME_SAMP
 
@@ -44,7 +43,16 @@ def load_16k(path: str) -> np.ndarray:
 def new_sdk() -> StreamSDK:
     sdk = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(2, 4, 2))
     sdk.online_mode = True
-    sdk.setup(SRC_IMG)
+    sdk.setup(
+        SRC_IMG,
+        max_size=800,
+        sampling_timesteps=20,
+        emo=4,
+        drive_eye=True,
+        smo_k_s=20,
+        # smo_k_d=5,
+        # overlap_v2=20,
+    )
     return sdk
 
 def _drain(q: queue.Queue):
@@ -143,7 +151,7 @@ async def speak(sessionid: str = Form(...)):
         _drain(sdk.frame_queue)
 
         sdk.start_processing_audio()
-
+        
         pos = 0
         while pos < len(SPEECH) and not stop_evt.is_set():
             slice_f32 = SPEECH[pos:pos + AUDIO_FRAME_SAMP]

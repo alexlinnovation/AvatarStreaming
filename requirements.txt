@@ -1,7 +1,9 @@
+torch==2.7.1
+torchvision
+torchaudio
 transformers==4.52.4
-qwen-omni-utils[decord] -U
-tensorrt==8.6.1
-numpy==2.0.1
+# qwen-omni-utils[decord] -U
+tensorrt
 librosa
 tqdm
 filetype
@@ -26,7 +28,8 @@ bitsandbytes
 f5-tts
 kokoro>=0.9.4 
 soundfile
-misaki[zh]
+# misaki[zh]
+
 
 # Run Manually
 # pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
