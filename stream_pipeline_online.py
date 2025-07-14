@@ -337,7 +337,7 @@ class StreamSDK:
         )
 
         # ======== Setup Motion Stitch ========
-        is_image_flag = source_info["is_image_flag"]
+        is_image_flag = True #source_info["is_image_flag"]
         x_s_info = source_info["x_s_info_lst"][0]
         self.motion_stitch.setup(
             N_d=self.N_d,
@@ -362,7 +362,7 @@ class StreamSDK:
         # ======== Audio Feat Buffer ========
         self.reset_audio_features()
         # ======== Setup Worker Threads ========
-        QUEUE_MAX_SIZE = 15000
+        QUEUE_MAX_SIZE = 1500000
 
         self.audio2motion_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
         self.motion_stitch_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)

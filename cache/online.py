@@ -7,13 +7,13 @@ import asyncio
 import threading, time, uuid, queue
 from fractions import Fraction
 import librosa
-import torch, torchaudio
+import torch
 import cv2, numpy as np, soundfile as sf
 from fastapi import FastAPI, Form
 from fastapi.staticfiles import StaticFiles
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from stream_pipeline_online import StreamSDK
-from src.webrtc import HumanPlayer, AUDIO_FRAME_SAMP
+from webrtc import HumanPlayer, AUDIO_FRAME_SAMP
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import onnxruntime as ort
@@ -26,8 +26,8 @@ CFG_PKL   = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
 DATA_ROOT = "./checkpoints/ditto_trt_Ampere_Plus"
 SRC_IMG   = "static/avatar.png"
 IDLE_FILE = "static/audio_with_silence.wav"
-BYTES_PER_FRAME = 640 
-IDLE_AUDIO = np.zeros(16000, dtype=np.float32)
+BYTES_PER_FRAME = 640      # fixed for this model
+IDLE_AUDIO = np.zeros(16000, dtype=np.float32)  # 1-s silence
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -55,20 +55,14 @@ def initialize_kokoro():
             "do_copy_in_default_stream": True,
         },
     )
-    sess = ort.InferenceSession("checkpoints/kokoro-v1.0.onnx", sess_options=sess_opts, providers=[cuda_provider])
-    kokoro = Kokoro.from_session(session=sess, voices_path="checkpoints/voices-v1.0.bin")
+    sess = ort.InferenceSession("kokoro-v1.0.onnx", sess_options=sess_opts, providers=[cuda_provider])
+    kokoro = Kokoro.from_session(session=sess, voices_path="voices-v1.0.bin")
     audio, sr = kokoro.create("Dummy initialization text", voice="af_heart",speed=1.0,lang="en-us")
     sf.write("test.wav", audio, sr)
     return kokoro
 
 
 # ─── helpers ──────────────────────────────────────────────────────────
-resampler = torchaudio.transforms.Resample(orig_freq=24000, new_freq=16000).cuda()
-def resample_torch(wav24: np.ndarray) -> np.ndarray:
-    wav_tensor = torch.tensor(wav24, dtype=torch.float32, device='cuda').unsqueeze(0)
-    wav16 = resampler(wav_tensor)
-    return wav16.squeeze(0).cpu().numpy()
-
 def load_16k(path: str) -> np.ndarray:
     data, sr = sf.read(path, dtype="float32")
     if data.ndim > 1:
@@ -82,11 +76,12 @@ def load_16k(path: str) -> np.ndarray:
         data = (data[base] * (1 - frac) + data[nxt] * frac).astype(np.float32)
     return data
 
-def new_sdk(src_img: str = SRC_IMG) -> StreamSDK:
+
+def new_sdk() -> StreamSDK:
     sdk = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(3, 5, 2))
     sdk.online_mode = True
     sdk.setup(
-        src_img,
+        SRC_IMG,
         max_size=1920,
         sampling_timesteps=15,
         emo=4,
@@ -119,28 +114,27 @@ def idle_feeder(sdk: StreamSDK, idle_evt: threading.Event, stop_evt: threading.E
 def frame_collector(sdk: StreamSDK, player: HumanPlayer, stop_evt: threading.Event):
     while not stop_evt.is_set():
         try:
-            buf, *_ = sdk.frame_queue.get(timeout=0.05)
+            buf, *_ = sdk.frame_queue.get(timeout=0.005)
             player.push_video(buf)
         except queue.Empty:
-            continue
+            time.sleep(0.001)
 
 # ─── Endpoints ─────────────────────────────────────────────────────
 class OfferModel(BaseModel):
     sdp: str
     type: str
-    src_img: str | None = None
     
 @app.post("/offer")
 async def offer(offer: OfferModel):
     sid = str(uuid.uuid4())
     idle_evt = threading.Event();  idle_evt.set()
     kill_evt = threading.Event()
-    sdk = new_sdk(offer.src_img or SRC_IMG)
+    sdk = new_sdk()
     kokoro = initialize_kokoro()
 
     present    = sdk.chunk_size[1] * BYTES_PER_FRAME
     # split_len  = int(sum(sdk.chunk_size) * BYTES_PER_FRAME) + 80
-    TARGET_FPS = 28
+    TARGET_FPS = 25 
     AUDIO_PER_FRAME = int(16000 / TARGET_FPS)
     split_len  = (sdk.chunk_size[0] + sdk.chunk_size[1] + sdk.chunk_size[2]) \
              * AUDIO_PER_FRAME  + 80
@@ -171,18 +165,13 @@ async def offer(offer: OfferModel):
     return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type, "sessionid": sid}
 
 # put this near your other constants
-SILENCE_SEC      = 1.05
+SILENCE_SEC      = 1.0
 SILENCE_SAMPLES  = int(SILENCE_SEC * 16000)          # 1-second, 16 kHz
 SILENCE_FRAME_I16 = (np.zeros(AUDIO_FRAME_SAMP).astype(np.float32) * 32767).astype(np.int16)
 
 
-@app.post("/speak", response_model=dict)
-async def speak(
-    sessionid: str = Form(...),
-    text: str = Form(None),
-    voice_style: str = Form(None),
-    speed: float = Form(None)
-):
+@app.post("/speak")
+async def speak(sessionid: str = Form(...)):
     sess = sessions.get(sessionid)
     if not sess: 
         return {"error": "unknown session"}
@@ -194,71 +183,43 @@ async def speak(
     kokoro       = sess["kokoro"]
     loop         = asyncio.get_event_loop()
     
-    text = text or (
-        "Yes, I came here five years ago, when I was just sixteen. "
-        "At the time, I was.. I was still in the tenth grade, and I clearly "
-        "remember doing my homework in the backseat of the car as we drove to our new home. "
-        "Everything felt unfamiliar and uncertain, but I tried to stay focused on school. "
-        "I didn’t know what to expect, and it took a while to get used to the language, the people, and the new routines."
-    )
-    voice_style = (voice_style or "af_heart").strip() or "af_heart"
-    speed = speed or 1.1
+    speed = 1.0
+    voice_style = "af_heart"
+    dummy_text = "Yes, I came here five years ago, when I was just sixteen. At the time, I was.. I was still in the tenth grade, and I clearly remember doing my homework in the backseat of the car as we drove to our new home. Everything felt unfamiliar and uncertain, but I tried to stay focused on school. I didn’t know what to expect, and it took a while to get used to the language, the people, and the new routines."
+    # dummy_text = "Yes, I came here five years ago, when I was just sixteen."
 
     def run_tts() -> np.ndarray:
         wav24, _ = kokoro.create(
-            text,
+            dummy_text,
             voice=voice_style,
             speed=speed,
             lang="en-us",
         )
-        return resample_torch(wav24)
+        return librosa.resample(wav24.astype(np.float32), orig_sr=24000, target_sr=16000)
 
     SPEECH: np.ndarray = await loop.run_in_executor(None, run_tts)
     
-    # Stop any running speech worker
+    # stop any running speech
     prev_stop = sess.get("speech_stop")
     prev_thr  = sess.get("speech_thread")
     if prev_thr and prev_thr.is_alive():
         prev_stop.set()
-        prev_thr.join(timeout=1.0)
+        prev_thr.join(timeout=0.2)
 
     stop_evt = threading.Event()
     sess["speech_stop"]   = stop_evt
     sess["speech_thread"] = None
 
-    # MOD: Hard flush of player audio queue & timestamp (very important!)
-    def hard_flush_player_audio(player):
-        try:
-            while True:
-                player._aud_q.get_nowait()
-        except Exception:
-            pass
-        if hasattr(player.audio, "_queue"):
-            try:
-                while True:
-                    player.audio._queue.get_nowait()
-            except Exception:
-                pass
-        # Reset timestamp/pts if your player.audio supports it (aiortc style)
-        if hasattr(player.audio, "_timestamp"):
-            player.audio._timestamp  = 0
-            player.audio._start_time = None
-
     def speech_worker():
         idle_evt.clear()
-        
-        # MOD: FLUSH ALL queues of SDK and player
-        for q in (
-            sdk.hubert_features_queue, sdk.audio2motion_queue, 
-            sdk.motion_stitch_queue, sdk.frame_queue, sdk.decode_f3d_queue, 
-            sdk.warp_f3d_queue, sdk.motion_stitch_out_queue
-        ):
+        # Clear all processing queues to ensure fresh start
+        for q in (sdk.hubert_features_queue, sdk.audio2motion_queue, 
+                sdk.motion_stitch_queue, sdk.frame_queue):
             _drain(q)
-        # MOD: flush player audio queues before next push
-        hard_flush_player_audio(player)
-        
-        sdk.start_processing_audio()
 
+        # Start audio processing pipeline
+        sdk.start_processing_audio()
+        
         # First push some silence to create buffer
         initial_silence = np.zeros(SILENCE_SAMPLES, dtype=np.float32)
         for i in range(0, len(initial_silence), AUDIO_FRAME_SAMP):
@@ -266,7 +227,7 @@ async def speak(
             if len(silence_frame) < AUDIO_FRAME_SAMP:
                 silence_frame = np.pad(silence_frame, (0, AUDIO_FRAME_SAMP - len(silence_frame)))
             player.push_audio((silence_frame * 32767).astype(np.int16))
-
+        
         # Process speech audio in chunks
         pos = 0
         while pos < len(SPEECH) and not stop_evt.is_set():
@@ -284,14 +245,66 @@ async def speak(
                 sdk.process_audio_chunk(chunk)
             
             pos += AUDIO_FRAME_SAMP
-            time.sleep(0.01995)  # 20ms per frame
+            time.sleep(0.020)  # 20ms per frame
 
         # End processing and return to idle
         sdk.end_processing_audio()
         idle_evt.set()
 
+    # def speech_worker():
+    #     idle_evt.clear()
+    #     for q in (sdk.hubert_features_queue, sdk.audio2motion_queue, sdk.motion_stitch_queue):
+    #         _drain(q)
+    #     _drain(sdk.frame_queue)
+
+    #     sdk.start_processing_audio()
+    #     audio_started = threading.Event()
+    #     audio_queue = queue.Queue()
+
+    #     # Start the audio pusher thread
+    #     def audio_pusher():
+    #         pos = 0
+    #         while not stop_evt.is_set():
+    #             try:
+    #                 chunk = audio_queue.get(timeout=0.1)
+    #             except queue.Empty:
+    #                 continue
+    #             chunk = librosa.resample(np.asarray(chunk, dtype=np.float32), orig_sr=24000, target_sr=16000)
+
+    #             if not audio_started.is_set() and sdk.frame_queue.qsize() > 0:
+    #                 audio_started.set()
+
+    #             # slice into 20ms frames and push
+    #             local_pos = 0
+    #             while local_pos < len(chunk) and not stop_evt.is_set():
+    #                 frame = chunk[local_pos:local_pos + AUDIO_FRAME_SAMP]
+    #                 if len(frame) < AUDIO_FRAME_SAMP:
+    #                     frame = np.pad(frame, (0, AUDIO_FRAME_SAMP - len(frame)))
+    #                 player.push_audio((frame * 32767).astype(np.int16))
+    #                 local_pos += AUDIO_FRAME_SAMP
+    #                 time.sleep(0.020)
+
+    #     threading.Thread(target=audio_pusher, daemon=True).start()
+
+    #     # Start TTS and push chunks to both audio & motion
+    #     pos = 0
+    #     for _, _, wav24 in pipeline(dummy_text, voice=voice_style, speed=float(speed)):
+    #         audio_queue.put(wav24)
+    #         chunk = librosa.resample(np.asarray(wav24, dtype=np.float32), orig_sr=24000, target_sr=16000)
+
+    #         # same chunking logic for visual processing
+    #         while pos < len(chunk) and not stop_evt.is_set():
+    #             if pos % present == 0:
+    #                 vis_chunk = chunk[pos:pos + split_len]
+    #                 if len(vis_chunk) < split_len:
+    #                     vis_chunk = np.pad(vis_chunk, (0, split_len - len(vis_chunk)))
+    #                 sdk.process_audio_chunk(vis_chunk)
+    #             pos += AUDIO_FRAME_SAMP
+
+    #     sdk.end_processing_audio()
+    #     idle_evt.set()
+
     t = threading.Thread(target=speech_worker, daemon=True)
     sess["speech_thread"] = t
     t.start()
     return {"status": "playing"}
-

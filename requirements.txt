@@ -1,34 +1,65 @@
 torch==2.7.1
-torchvision
-torchaudio
+torchvision==0.22.1
+torchaudio==2.7.1
 transformers==4.52.4
-# qwen-omni-utils[decord] -U
-tensorrt
-librosa
-tqdm
-filetype
-imageio
-opencv-python-headless
-scikit-image
-cython
-cuda-python
-imageio-ffmpeg
-colored
-polygraphy
-turbojpeg
-fastapi
-uvicorn
-starlette
-aiofiles  # required for StaticFiles
-python-multipart  # for Form/File handling
-aiohttp  # optional if using websockets or streaming
-accelerate
-bitsandbytes
+aiortc==1.13.0
+tensorrt==8.6.1
+librosa==0.11.0
+tqdm==4.67.1
+filetype==1.2.0
+imageio==2.37.0
+opencv-python-headless==4.11.0.86
+scikit-image==0.25.2
+cython==3.1.1
+cuda-python==12.9.0
+imageio-ffmpeg==0.6.0
+colored==2.3.0
+polygraphy==0.49.24
+fastapi==0.115.12
+uvicorn==0.34.3
+starlette==0.46.2
+aiofiles==24.1.0
+python-multipart==0.0.20
+aiohttp==3.12.9
+accelerate==1.6.0
+bitsandbytes==0.46.0
+f5-tts==1.1.5
+kokoro==0.9.4
+soundfile==0.13.1
 
-f5-tts
-kokoro>=0.9.4 
-soundfile
-# misaki[zh]
+
+# torch==2.7.1
+# torchvision
+# torchaudio
+# transformers==4.52.4
+# # qwen-omni-utils[decord] -U
+# aiortc
+# tensorrt==8.6.1
+# librosa
+# tqdm
+# filetype
+# imageio
+# opencv-python-headless
+# scikit-image
+# cython
+# cuda-python
+# imageio-ffmpeg
+# colored
+# polygraphy
+# turbojpeg
+# fastapi
+# uvicorn
+# starlette
+# aiofiles  # required for StaticFiles
+# python-multipart  # for Form/File handling
+# aiohttp  # optional if using websockets or streaming
+# accelerate
+# bitsandbytes
+
+# f5-tts
+# kokoro>=0.9.4 
+# soundfile
+# # misaki[zh]
 
 
 # Run Manually

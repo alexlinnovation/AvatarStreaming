@@ -19,7 +19,7 @@ from aiortc import MediaStreamTrack
 import cv2
 
 # --- timing constants --------------------------------------------------------
-FPS               = 25
+FPS               = 28
 VIDEO_PTIME       = 1 / FPS
 VIDEO_CLOCK_RATE  = 90_000
 VIDEO_TIME_BASE   = fractions.Fraction(1, VIDEO_CLOCK_RATE)
@@ -114,6 +114,13 @@ class HumanPlayer:
     def push_video(self, jpeg_bytes: bytes) -> None:
         """jpeg‐encoded BGR frame from SDK"""
         self._vid_q.put(jpeg_bytes, block=False)
+    
+    def reset(self):
+        """Clear timestamps so a new /speak starts at 0 ms."""
+        self.audio._timestamp = 0
+        self.video._timestamp = 0
+        self.audio._start_time = None
+        self.video._start_time = None
 
     # ---------------------------------------------------------------------
     # internals

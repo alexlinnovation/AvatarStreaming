@@ -208,7 +208,7 @@ class Audio2Motion:
 
         # Apply additional low-pass filtering to further reduce high frequencies
         # This is a simple exponential moving average
-        alpha = 0.1  # Higher values = more smoothing, lower frequencies
+        alpha = 0.05  # Higher values = more smoothing, lower frequencies
         filtered_kp_seq = res_kp_seq.copy()
 
         for i in range(s + 1, e):
