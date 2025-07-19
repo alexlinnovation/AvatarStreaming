@@ -19,7 +19,7 @@ from aiortc import MediaStreamTrack
 import cv2
 
 # --- timing constants --------------------------------------------------------
-FPS               = 28
+FPS               = 40
 VIDEO_PTIME       = 1 / FPS
 VIDEO_CLOCK_RATE  = 90_000
 VIDEO_TIME_BASE   = fractions.Fraction(1, VIDEO_CLOCK_RATE)

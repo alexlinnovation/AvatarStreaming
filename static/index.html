@@ -126,16 +126,13 @@
   function selectAvatar(path, el) {
     selectedAvatar = path;
     if (path.includes('avatar')) voiceStyle = 'af_heart';
-    else if (path.includes('elenora')) voiceStyle = 'af_bella';
-    else if (path.includes('james')) voiceStyle = 'am_michael';
+    else if (path.includes('elenora')) voiceStyle = 'af_sky';
+    else if (path.includes('james')) voiceStyle = 'am_adam';
 
     document.querySelectorAll('.avatar-option').forEach(e => e.classList.remove('selected'));
     el.classList.add('selected');
   }
 
-  navigator.mediaDevices.getUserMedia({video: true, audio: false})
-    .then(stream => { document.getElementById('self').srcObject = stream; })
-    .catch(err => console.warn('cam err', err));
 
   let clockTimer = null, startTs = 0;
   function startClock() {
@@ -151,18 +148,20 @@
     const m = Math.floor(now / 60000) % 60;
     document.getElementById('clock').textContent = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
   }
+  async function fetchIceServers() {
+    const response = await fetch('/api/iceservers', { method: 'POST' });
+    if (!response.ok) throw new Error('Failed to fetch ICE servers');
+    const data = await response.json();
+    return data.iceServers;
+  }
+
 
   async function connect() {
     try {
-      pc = new RTCPeerConnection({
-        iceServers: [
-          {urls: 'stun:stun.l.google.com:19302'},
-          {urls: 'stun:relay1.expressturn.com:3478',
-           username: 'efTYZ01RL1QUJ5CFUX', credential: 'AOZVt0YaAPWCJPbQ'},
-          {urls: 'turn:relay1.expressturn.com:3478',
-           username: 'efTYZ01RL1QUJ5CFUX', credential: 'AOZVt0YaAPWCJPbQ'}
-        ]
-      });
+      const iceServers = await fetchIceServers();
+
+      pc = new RTCPeerConnection({ iceServers });
+
       pc.addTransceiver('video', {direction: 'recvonly'});
       pc.addTransceiver('audio', {direction: 'recvonly'});
 
@@ -188,8 +187,12 @@
       const ans = await reply.json();
       await pc.setRemoteDescription(new RTCSessionDescription(ans));
       sessionId = ans.sessionid;
-    } catch (err) { console.error('Connection error:', err); }
+    } catch (err) {
+      console.error('Connection error:', err);
+      alert('Failed to connect: ' + err.message);
+    }
   }
+
 
   async function sendSpeak() {
     const text = document.getElementById('text').value.trim();

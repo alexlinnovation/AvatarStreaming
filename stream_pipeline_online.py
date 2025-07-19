@@ -718,9 +718,9 @@ class StreamSDK:
     def reset(self):
         self.fps_tracker.stop()
         self.motion_stitch.reset_state()
-        self.audio2motion.reset_state()
+        # self.audio2motion.reset_state()
 
-        self.audio2motion_queue.queue.clear()
+        # self.audio2motion_queue.queue.clear()
         self.motion_stitch_queue.queue.clear()
         self.putback_queue.queue.clear()
         self.warp_f3d_queue.queue.clear()

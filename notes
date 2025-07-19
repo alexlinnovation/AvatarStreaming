@@ -1,0 +1,42 @@
+async def _tts_and_stream(kokoro, text, voice, speed,
+                          player, sdk, present, split_len, stop_evt):
+    FRAME   = AUDIO_FRAME_SAMP          # 320 (20 ms)
+    RATE    = 16000
+    STEP    = FRAME / RATE              # 0.02 s
+    ctx     = np.zeros(split_len, dtype=np.float32)
+    filled  = 0
+    since   = 0                         # samples since last SDK call
+
+    async for chunk24, _ in kokoro.create_stream(text,
+                                                 voice=voice,
+                                                 speed=speed,
+                                                 lang="en-us"):
+        if stop_evt.is_set():
+            break
+        pcm = resample_torch(chunk24)
+        off = 0
+        while off < len(pcm):
+            frame = pcm[off:off+FRAME]
+            off  += FRAME
+            if len(frame) < FRAME:
+                frame = np.pad(frame, (0, FRAME-len(frame)))
+
+            # -- push audio (20 ms) ---------------------------------
+            player.push_audio((frame*32767).astype(np.int16))
+
+            # -- roll 40 ms context --------------------------------
+            ctx = np.roll(ctx, -FRAME)
+            ctx[-FRAME:] = frame
+            filled = min(filled + FRAME, split_len)
+            since  += FRAME
+
+            # -- every present (5120 samples) feed model -----------
+            if filled == split_len and since >= present:
+                sdk.process_audio_chunk(ctx.copy())
+                since = 0
+
+            await asyncio.sleep(STEP)
+
+    # flush tail so last syllable animates
+    if filled == split_len and not stop_evt.is_set():
+        sdk.process_audio_chunk(ctx.copy())

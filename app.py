@@ -20,14 +20,12 @@ from aiortc.contrib.media import MediaRelay, MediaPlayer
 from starlette.websockets import WebSocketDisconnect
 from aiortc.mediastreams import VideoFrame, MediaStreamError, MediaStreamTrack, VideoStreamTrack
 from inference import run
-from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor, BitsAndBytesConfig
-from qwen_omni_utils import process_mm_info
 
 app = FastAPI()
 peers = {} 
 
 DATA_ROOT = "./checkpoints/ditto_trt_Ampere_Plus"
-CFG_PKL = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
+CFG_PKL = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt.pkl"
 sdk = StreamSDKOffline(CFG_PKL, DATA_ROOT)
 
 sdk_online = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(3, 5, 2))

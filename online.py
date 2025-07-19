@@ -7,6 +7,7 @@ import asyncio
 import threading, time, uuid, queue
 from fractions import Fraction
 import librosa
+import requests
 import torch, torchaudio
 import cv2, numpy as np, soundfile as sf
 from fastapi import FastAPI, Form
@@ -83,17 +84,17 @@ def load_16k(path: str) -> np.ndarray:
     return data
 
 def new_sdk(src_img: str = SRC_IMG) -> StreamSDK:
-    sdk = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(3, 5, 2))
+    sdk = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(2, 4, 2))
     sdk.online_mode = True
     sdk.setup(
         src_img,
-        max_size=1920,
+        max_size=1980,
         sampling_timesteps=15,
         emo=4,
         drive_eye=True,
-        # smo_k_s=5,
-        # smo_k_d=2,
-        # overlap_v2=20,
+        fix_kp_cond=0, 
+        v_min_max_for_clip=None, 
+        # overlap_v2=68,
     )
     return sdk
 
@@ -114,12 +115,12 @@ def idle_feeder(sdk: StreamSDK, idle_evt: threading.Event, stop_evt: threading.E
         sdk.start_processing_audio()
         sdk.process_audio_chunk(np.zeros(sdk.split_len, dtype=np.float32))
         sdk.end_processing_audio()
-        # torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
 def frame_collector(sdk: StreamSDK, player: HumanPlayer, stop_evt: threading.Event):
     while not stop_evt.is_set():
         try:
-            buf, *_ = sdk.frame_queue.get(timeout=0.05)
+            buf, *_ = sdk.frame_queue.get(timeout=0.02)
             player.push_video(buf)
         except queue.Empty:
             continue
@@ -140,8 +141,8 @@ async def offer(offer: OfferModel):
 
     present    = sdk.chunk_size[1] * BYTES_PER_FRAME
     # split_len  = int(sum(sdk.chunk_size) * BYTES_PER_FRAME) + 80
-    TARGET_FPS = 28
-    AUDIO_PER_FRAME = int(16000 / TARGET_FPS)
+    TARGET_FPS = 35
+    AUDIO_PER_FRAME =  640 #int(16000 / TARGET_FPS)
     split_len  = (sdk.chunk_size[0] + sdk.chunk_size[1] + sdk.chunk_size[2]) \
              * AUDIO_PER_FRAME  + 80
     idle_slice = np.pad(IDLE_AUDIO[:split_len], (0, max(0, split_len - len(IDLE_AUDIO))), 'constant')
@@ -174,26 +175,24 @@ async def offer(offer: OfferModel):
 SILENCE_SEC      = 1.05
 SILENCE_SAMPLES  = int(SILENCE_SEC * 16000)          # 1-second, 16 kHz
 SILENCE_FRAME_I16 = (np.zeros(AUDIO_FRAME_SAMP).astype(np.float32) * 32767).astype(np.int16)
-
-
 @app.post("/speak", response_model=dict)
 async def speak(
     sessionid: str = Form(...),
     text: str = Form(None),
     voice_style: str = Form(None),
-    speed: float = Form(None)
+    speed: float = Form(None),
 ):
     sess = sessions.get(sessionid)
-    if not sess: 
+    if not sess:
         return {"error": "unknown session"}
-    sdk          = sess["sdk"]
-    idle_evt     = sess["idle_evt"]
-    player       = sess["player"]
-    present      = sess["present"]
-    split_len    = sess["split_len"]
-    kokoro       = sess["kokoro"]
-    loop         = asyncio.get_event_loop()
-    
+
+    sdk        = sess["sdk"]
+    idle_evt   = sess["idle_evt"]
+    player     = sess["player"]
+    present    = sess["present"]
+    split_len  = sess["split_len"]
+    kokoro     = sess["kokoro"]
+
     text = text or (
         "Yes, I came here five years ago, when I was just sixteen. "
         "At the time, I was.. I was still in the tenth grade, and I clearly "
@@ -202,31 +201,19 @@ async def speak(
         "I didn’t know what to expect, and it took a while to get used to the language, the people, and the new routines."
     )
     voice_style = (voice_style or "af_heart").strip() or "af_heart"
-    speed = speed or 1.1
+    speed       = speed or 1.1
 
-    def run_tts() -> np.ndarray:
-        wav24, _ = kokoro.create(
-            text,
-            voice=voice_style,
-            speed=speed,
-            lang="en-us",
-        )
-        return resample_torch(wav24)
-
-    SPEECH: np.ndarray = await loop.run_in_executor(None, run_tts)
-    
     # Stop any running speech worker
     prev_stop = sess.get("speech_stop")
     prev_thr  = sess.get("speech_thread")
     if prev_thr and prev_thr.is_alive():
         prev_stop.set()
         prev_thr.join(timeout=1.0)
-
     stop_evt = threading.Event()
     sess["speech_stop"]   = stop_evt
     sess["speech_thread"] = None
 
-    # MOD: Hard flush of player audio queue & timestamp (very important!)
+    # Flush (but do NOT touch timestamps)
     def hard_flush_player_audio(player):
         try:
             while True:
@@ -239,59 +226,69 @@ async def speak(
                     player.audio._queue.get_nowait()
             except Exception:
                 pass
-        # Reset timestamp/pts if your player.audio supports it (aiortc style)
-        if hasattr(player.audio, "_timestamp"):
-            player.audio._timestamp  = 0
-            player.audio._start_time = None
 
     def speech_worker():
         idle_evt.clear()
-        
-        # MOD: FLUSH ALL queues of SDK and player
         for q in (
             sdk.hubert_features_queue, sdk.audio2motion_queue, 
             sdk.motion_stitch_queue, sdk.frame_queue, sdk.decode_f3d_queue, 
             sdk.warp_f3d_queue, sdk.motion_stitch_out_queue
         ):
             _drain(q)
-        # MOD: flush player audio queues before next push
         hard_flush_player_audio(player)
-        
         sdk.start_processing_audio()
 
-        # First push some silence to create buffer
-        initial_silence = np.zeros(SILENCE_SAMPLES, dtype=np.float32)
-        for i in range(0, len(initial_silence), AUDIO_FRAME_SAMP):
-            silence_frame = initial_silence[i:i+AUDIO_FRAME_SAMP]
-            if len(silence_frame) < AUDIO_FRAME_SAMP:
-                silence_frame = np.pad(silence_frame, (0, AUDIO_FRAME_SAMP - len(silence_frame)))
-            player.push_audio((silence_frame * 32767).astype(np.int16))
-
-        # Process speech audio in chunks
-        pos = 0
-        while pos < len(SPEECH) and not stop_evt.is_set():
-            # Push audio frame to player (20ms chunks)
-            slice_f32 = SPEECH[pos:pos + AUDIO_FRAME_SAMP]
-            if len(slice_f32) < AUDIO_FRAME_SAMP:
-                slice_f32 = np.pad(slice_f32, (0, AUDIO_FRAME_SAMP - len(slice_f32)))
-            player.push_audio((slice_f32 * 32767).astype(np.int16))
-
-            # Process visual chunk when at presentation boundary
-            if pos % present == 0:
-                chunk = SPEECH[pos:pos + split_len]
-                if len(chunk) < split_len:
-                    chunk = np.pad(chunk, (0, split_len - len(chunk)))
-                sdk.process_audio_chunk(chunk)
-            
-            pos += AUDIO_FRAME_SAMP
-            time.sleep(0.01995)  # 20ms per frame
-
-        # End processing and return to idle
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        fut = loop.create_task(
+            _tts_and_stream(
+                kokoro, text, voice_style, speed, player, sdk, present, split_len, stop_evt
+            )
+        )
+        loop.run_until_complete(fut)
         sdk.end_processing_audio()
         idle_evt.set()
+
+    async def _tts_and_stream(kokoro, text, voice, speed, player, sdk, present, split_len, stop_evt):
+        pos = 0
+        chunk_buf = np.array([], dtype=np.float32)
+        async for audio_chunk, sr in kokoro.create_stream(text, voice=voice, speed=speed, lang="en-us"):
+            chunk_16k = resample_torch(audio_chunk)
+            chunk_buf = np.concatenate([chunk_buf, chunk_16k])
+            while len(chunk_buf) >= AUDIO_FRAME_SAMP:
+                frame = chunk_buf[:AUDIO_FRAME_SAMP]
+                chunk_buf = chunk_buf[AUDIO_FRAME_SAMP:]
+                player.push_audio((frame * 32767).astype(np.int16))
+
+                # SDK visual chunk processing at proper boundary
+                if pos % present == 0:
+                    vis_chunk = chunk_buf[:split_len]
+                    if len(vis_chunk) < split_len:
+                        vis_chunk = np.pad(vis_chunk, (0, split_len - len(vis_chunk)))
+                    sdk.process_audio_chunk(vis_chunk)
+                pos += AUDIO_FRAME_SAMP
+                await asyncio.sleep(0.02)  # Stream in real-time
+        # Push any trailing frames
+        while len(chunk_buf) > 0:
+            frame = chunk_buf[:AUDIO_FRAME_SAMP]
+            chunk_buf = chunk_buf[AUDIO_FRAME_SAMP:]
+            player.push_audio((frame * 32767).astype(np.int16))
+            pos += AUDIO_FRAME_SAMP
+            await asyncio.sleep(0.02)
 
     t = threading.Thread(target=speech_worker, daemon=True)
     sess["speech_thread"] = t
     t.start()
     return {"status": "playing"}
 
+
+TURNIX_API_KEY = "b750a7ff80271bf7ac63536f1f5f0b2d"
+
+@app.post("/api/iceservers")
+def get_ice_servers():
+    headers = {
+        "Authorization": f"Bearer {TURNIX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    r = requests.post("https://turnix.io/api/v1/credentials/ice", headers=headers)
+    return r.json()

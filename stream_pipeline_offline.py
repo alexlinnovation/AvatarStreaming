@@ -4,16 +4,16 @@ import numpy as np
 import traceback
 from tqdm import tqdm
 
-from core.atomic_components.avatar_registrar import AvatarRegistrar, smooth_x_s_info_lst
-from core.atomic_components.condition_handler import ConditionHandler, _mirror_index
-from core.atomic_components.audio2motion import Audio2Motion
-from core.atomic_components.motion_stitch import MotionStitch
-from core.atomic_components.warp_f3d import WarpF3D
-from core.atomic_components.decode_f3d import DecodeF3D
-from core.atomic_components.putback import PutBack
-from core.atomic_components.writer import VideoWriterByImageIO
-from core.atomic_components.wav2feat import Wav2Feat
-from core.atomic_components.cfg import parse_cfg, print_cfg
+from core_offline.atomic_components.avatar_registrar import AvatarRegistrar, smooth_x_s_info_lst
+from core_offline.atomic_components.condition_handler import ConditionHandler, _mirror_index
+from core_offline.atomic_components.audio2motion import Audio2Motion
+from core_offline.atomic_components.motion_stitch import MotionStitch
+from core_offline.atomic_components.warp_f3d import WarpF3D
+from core_offline.atomic_components.decode_f3d import DecodeF3D
+from core_offline.atomic_components.putback import PutBack
+from core_offline.atomic_components.writer import VideoWriterByImageIO
+from core_offline.atomic_components.wav2feat import Wav2Feat
+from core_offline.atomic_components.cfg import parse_cfg, print_cfg
 
 
 class StreamSDK:
