@@ -26,7 +26,9 @@ bitsandbytes==0.46.0
 f5-tts==1.1.5
 kokoro==0.9.4
 soundfile==0.13.1
-
+livekit==1.0.12
+livekit-agents==1.2.1
+livekit-api==1.0.3
 
 # torch==2.7.1
 # torchvision

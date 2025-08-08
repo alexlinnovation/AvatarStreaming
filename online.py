@@ -88,13 +88,11 @@ def new_sdk(src_img: str = SRC_IMG) -> StreamSDK:
     sdk.online_mode = True
     sdk.setup(
         src_img,
-        max_size=1980,
-        sampling_timesteps=15,
+        max_size=800,
+        sampling_timesteps=4,
         emo=4,
         drive_eye=True,
-        fix_kp_cond=0, 
-        v_min_max_for_clip=None, 
-        # overlap_v2=68,
+        overlap_v2=70,
     )
     return sdk
 
@@ -175,6 +173,8 @@ async def offer(offer: OfferModel):
 SILENCE_SEC      = 1.05
 SILENCE_SAMPLES  = int(SILENCE_SEC * 16000)          # 1-second, 16 kHz
 SILENCE_FRAME_I16 = (np.zeros(AUDIO_FRAME_SAMP).astype(np.float32) * 32767).astype(np.int16)
+
+
 @app.post("/speak", response_model=dict)
 async def speak(
     sessionid: str = Form(...),
@@ -203,12 +203,6 @@ async def speak(
     voice_style = (voice_style or "af_heart").strip() or "af_heart"
     speed       = speed or 1.1
 
-    # Stop any running speech worker
-    prev_stop = sess.get("speech_stop")
-    prev_thr  = sess.get("speech_thread")
-    if prev_thr and prev_thr.is_alive():
-        prev_stop.set()
-        prev_thr.join(timeout=1.0)
     stop_evt = threading.Event()
     sess["speech_stop"]   = stop_evt
     sess["speech_thread"] = None

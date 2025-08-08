@@ -1,6 +1,8 @@
 import numpy as np
 import torch
+
 from ..utils.load_model import load_model
+from ..utils.profile_util import profile
 
 
 def make_beta(n_timestep, cosine_s=8e-3):
@@ -16,6 +18,7 @@ def make_beta(n_timestep, cosine_s=8e-3):
 
 
 class LMDM:
+    @profile("LMDM::init")
     def __init__(self, model_path, device="cuda", **kwargs):
         kwargs["module_name"] = "LMDM"
 
@@ -31,12 +34,14 @@ class LMDM:
         else:
             self._init_np()
 
+    @profile("LMDM::setup")
     def setup(self, sampling_timesteps):
         if self.model_type == "pytorch":
             self.model.setup(sampling_timesteps)
         else:
             self._setup_np(sampling_timesteps)
 
+    @profile("LMDM::_init_np")
     def _init_np(self):
         self.sampling_timesteps = None
         self.n_timestep = 1000
@@ -45,7 +50,8 @@ class LMDM:
         alphas = 1.0 - betas
         self.alphas_cumprod = torch.cumprod(alphas, axis=0).cpu().numpy()
 
-    def _setup_np(self, sampling_timesteps=8):
+    @profile("LMDM::_setup_np")
+    def _setup_np(self, sampling_timesteps=50):
         if self.sampling_timesteps == sampling_timesteps:
             return
         
@@ -57,7 +63,9 @@ class LMDM:
 
         times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
         times = list(reversed(times.int().tolist()))
-        self.time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+        self.time_pairs = list(
+            zip(times[:-1], times[1:], strict=False)
+        )  # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
         self.time_cond_list = []
         self.alpha_next_sqrt_list = []
@@ -76,22 +84,37 @@ class LMDM:
 
             sigma = eta * np.sqrt((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha))
             c = np.sqrt(1 - alpha_next - sigma ** 2)
-            # noise = np.random.randn(*shape).astype(np.float32)
+            noise = np.random.randn(*shape).astype(np.float32)
             
             self.alpha_next_sqrt_list.append(np.sqrt(alpha_next))
             self.sigma_list.append(sigma)
             self.c_list.append(c)
-            # self.noise_list.append(noise)
-            self.noise_list.append(None)
+            self.noise_list.append(noise)
 
+    @profile("lmdm::_one_step")
     def _one_step(self, x, cond_frame, cond, time_cond):
         if self.model_type == "onnx":
             pred = self.model.run(None, {"x": x, "cond_frame": cond_frame, "cond": cond, "time_cond": time_cond})
             pred_noise, x_start = pred[0], pred[1]
         elif self.model_type == "tensorrt":
-            self.model.setup({"x": x, "cond_frame": cond_frame, "cond": cond, "time_cond": time_cond})
-            self.model.infer()
-            pred_noise, x_start = self.model.buffer["pred_noise"][0], self.model.buffer["x_start"][0]
+            # Use pinned memory for faster transfers
+            with torch.cuda.stream(torch.cuda.Stream()):
+                inputs = {
+                    "x": torch.from_numpy(x).cuda(non_blocking=True),
+                    "cond_frame": torch.from_numpy(cond_frame).cuda(non_blocking=True),
+                    "cond": torch.from_numpy(cond).cuda(non_blocking=True),
+                    "time_cond": torch.from_numpy(time_cond).cuda(non_blocking=True),
+                }
+                # Convert back to CPU numpy arrays for TensorRT
+                inputs = {name: tensor.cpu().numpy() for name, tensor in inputs.items()}
+                self.model.setup(inputs)
+                # Optional: Enable FP16 if supported by your model
+                # self.model.set_precision(trt.float16)
+                self.model.infer()
+                pred_noise = self.model.buffer["pred_noise"][0]
+                x_start = self.model.buffer["x_start"][0]
+                # Ensure computations are complete
+                torch.cuda.current_stream().synchronize()
         elif self.model_type == "pytorch":
             with torch.no_grad():
                 pred_noise, x_start = self.model(x, cond_frame, cond, time_cond)
@@ -120,14 +143,14 @@ class LMDM:
             alpha_next_sqrt = self.alpha_next_sqrt_list[i]
             c = self.c_list[i]
             sigma = self.sigma_list[i]
-            # noise = self.noise_list[i]
-            noise = np.random.randn(*x.shape).astype(np.float16)
+            noise = self.noise_list[i]
             x = x_start * alpha_next_sqrt + c * pred_noise + sigma * noise
 
             i += 1
 
         return x
 
+    @profile("LMDM::call")
     def __call__(self, kp_cond, aud_cond, sampling_timesteps):
         if self.model_type == "pytorch":
             pred_kp_seq = self.model.ddim_sample(

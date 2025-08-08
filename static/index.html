@@ -160,7 +160,11 @@
     try {
       const iceServers = await fetchIceServers();
 
-      pc = new RTCPeerConnection({ iceServers });
+            pc = new RTCPeerConnection({
+        iceServers,
+        iceTransportPolicy: 'relay', // Optional: force TURN-only if needed
+        bundlePolicy: 'balanced'
+      });
 
       pc.addTransceiver('video', {direction: 'recvonly'});
       pc.addTransceiver('audio', {direction: 'recvonly'});

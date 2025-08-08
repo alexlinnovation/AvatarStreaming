@@ -1,4 +1,5 @@
 FROM nvcr.io/nvidia/tensorrt:23.12-py3
+ENV NVIDIA_DISABLE_REQUIRE=1
 
 # ───── SYSTEM DEPENDENCIES ────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,4 +27,4 @@ COPY . .
 
 # ───── EXPOSE PORT + RUN ──────────────────────────────────────
 EXPOSE 8010
-CMD ["uvicorn", "online:app", "--host", "0.0.0.0", "--port", "8010", "--reload"]
+CMD ["uvicorn", "livekit_video:app", "--host", "0.0.0.0", "--port", "8010", "--reload"]
