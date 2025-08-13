@@ -244,7 +244,7 @@ class StreamSDK:
         self.N_d = kwargs.get("N_d", -1)
         self.use_d_keys = kwargs.get("use_d_keys", None)
         self.relative_d = kwargs.get("relative_d", True)
-        self.drive_eye = kwargs.get("drive_eye", None)  # None: true4image, false4video
+        self.drive_eye = True # None: true4image, false4video
         self.delta_eye_arr = kwargs.get("delta_eye_arr", None)
         self.delta_eye_open_n = kwargs.get("delta_eye_open_n", 0)
         self.fade_type = kwargs.get("fade_type", "")  # "" | "d0" | "s"
@@ -314,7 +314,7 @@ class StreamSDK:
         )
 
         # ======== Setup Motion Stitch ========
-        is_image_flag = source_info["is_image_flag"]
+        is_image_flag = True
         x_s_info = source_info["x_s_info_lst"][0]
         self.motion_stitch.setup(
             N_d=self.N_d,

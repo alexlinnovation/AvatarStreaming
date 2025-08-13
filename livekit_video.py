@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # avatar_livekit_fixed.py  – StreamSDK avatar → LiveKit Cloud  (idle / speak API)
 # ------------------------------------------------------------------------------
-
+from gated_avsync import GatedAVSynchronizer
 import collections
 import asyncio, logging, uuid, time, io, queue, threading
 import numpy as np, torch, torchaudio, av
@@ -40,7 +40,7 @@ CHUNK_SIZE = (2, 4, 2)
 SAMPLING_TIMESTEP = 8
 RESOLUTION = 1080
 BUFFER = 160
-SILENCE_BUFFER = 320
+SILENCE_BUFFER = 160
 
 _resampler = None
 _resampler_lock = threading.Lock()
@@ -119,7 +119,7 @@ class AvatarSession:
         atr = rtc.LocalAudioTrack.create_audio_track("a", asrc)
         await self.lk_room.local_participant.publish_track(vtr)
         await self.lk_room.local_participant.publish_track(atr)
-        self.av_sync = rtc.AVSynchronizer(
+        self.av_sync = GatedAVSynchronizer(
             audio_source=asrc,
             video_source=vs,
             video_fps=FPS_1,

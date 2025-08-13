@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 **/*.py[cod]
 *$py.class
+push.sh
 
 # Model weights
 checkpoints
