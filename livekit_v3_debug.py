@@ -37,10 +37,10 @@ API_SECRET = "XCWjdkZbDW2oj56f0eJjStwLEga2FRfMJzvfJ09WN7aB"
 FPS_1 = 25
 FPS_2 = 25
 CHUNK_SIZE = (2, 4, 2)
-SAMPLING_TIMESTEP = 12
+SAMPLING_TIMESTEP = 10
 RESOLUTION = 1080
 BUFFER = 320
-SILENCE_BUFFER = 320
+SILENCE_BUFFER = 2000
 
 _resampler = None
 _resampler_lock = threading.Lock()
@@ -69,6 +69,15 @@ def viewer_token(room: str) -> str:
         .to_jwt()
     )
 
+class _RateLimiter:
+    def __init__(self): self.t = 0.0
+    def ok(self, interval_s: float) -> bool:
+        now = time.perf_counter()
+        if now - self.t >= interval_s:
+            self.t = now
+            return True
+        return False
+
 class AvatarSession:
     def __init__(self, room: str, avatar_png: str):
         self.room_name = room
@@ -89,6 +98,7 @@ class AvatarSession:
         self.buffered_audio: List[bytes] = []
         self.video_frames = 0
         self.FPS = FPS_2
+        self._log_rl = _RateLimiter()
 
     async def _silence_loop(self):
         zero_audio = np.zeros(SILENCE_BUFFER, np.float32)
@@ -199,6 +209,8 @@ class AvatarSession:
             await asyncio.sleep(rate)
 
     async def speak(self, text: str, voice: str = "af_heart"):
+        t0 = time.perf_counter()
+        log.info(f"[SPEAK] start len={len(text)} voice={voice}")
         if self.silence_task:
             self.silence_task.cancel()
             try:
@@ -209,30 +221,57 @@ class AvatarSession:
         rate = 16_000
         pos = 0
         buf = np.empty(0, np.float32)
+        first_chunk_at = None
+        pushed = 0
+        buffered = 0
+        t_last_summary = t0
+        t_res_acc = 0.0
+        n_res = 0
+        SLOW_PUSH_MS = 20.0
+        SUMMARY_EVERY_S = 1.0
         async for chunk24, _ in self.kokoro.create_stream(text, voice=voice, speed=1.0, lang="en-us"):
+            if first_chunk_at is None:
+                first_chunk_at = time.perf_counter() - t0
+                log.info(f"[SPEAK] first_tts_chunk_after={first_chunk_at*1000:.1f}ms")
+            t_res0 = time.perf_counter()
             buf = np.concatenate([buf, resample(chunk24)])
+            t_res1 = time.perf_counter()
+            t_res_acc += (t_res1 - t_res0)
+            n_res += 1
             while len(buf) >= BUFFER:
                 frame, buf = buf[:BUFFER], buf[BUFFER:]
                 af_bytes = (frame * 32767).astype(np.int16).tobytes()
                 if self.video_frames == 0:
                     self.buffered_audio.append(af_bytes)
                     self.samples_pushed += BUFFER
+                    buffered += 1
                 else:
                     ts = self.samples_pushed / rate
+                    t_push0 = time.perf_counter()
                     af = rtc.AudioFrame(af_bytes, rate, 1, BUFFER)
                     await self.av_sync.push(af, ts)
+                    t_push1 = time.perf_counter()
                     self.samples_pushed += BUFFER
+                    pushed += 1
+                    dt_ms = (t_push1 - t_push0) * 1000.0
+                    if dt_ms > SLOW_PUSH_MS and self._log_rl.ok(0.5):
+                        log.info(f"[SPEAK] slow_push ts={ts:.3f}s wait={dt_ms:.1f}ms vt={self.av_sync.last_video_time:.3f}s q_warn")
                 if pos % self.present == 0:
                     vis = buf[: self.SPL]
                     if vis.size < self.SPL:
                         vis = np.pad(vis, (0, self.SPL - vis.size))
                     self.sdk.process_audio_chunk(vis)
                 pos += BUFFER
+            if (time.perf_counter() - t_last_summary) >= SUMMARY_EVERY_S:
+                avg_res_ms = (t_res_acc / max(1, n_res)) * 1000.0
+                log.info(f"[SPEAK] summary pushed={pushed} buffered_pre_video={buffered} avg_resample={avg_res_ms:.2f}ms vt={self.av_sync.last_video_time:.3f}s at={(time.perf_counter()-t0):.2f}s")
+                t_last_summary = time.perf_counter()
+                t_res_acc = 0.0
+                n_res = 0
             await asyncio.sleep(0)
-        
+        log.info(f"[SPEAK] done chunks pushed={pushed} buffered_pre_video={buffered} total={(time.perf_counter()-t0)*1000:.1f}ms")
         if self.silence_task is None:
             self.silence_task = self.loop.create_task(self._silence_loop())
-
 
     async def stop(self):
         if self.video_thread_stop_event:
@@ -315,10 +354,12 @@ async def offer_endpoint(req: OfferReq):
 
 @app.post("/speak")
 async def speak_endpoint(req: SpeakReq):
+    t_req = time.perf_counter()
     ses = _sessions.get(req.room)
     if not ses:
         raise HTTPException(404, "room not found")
     await ses.speak(req.text, req.voice or "af_heart")
+    log.info(f"[HTTP SPEAK] completed {(time.perf_counter()-t_req)*1000:.1f}ms")
     return {"status": "ok"}
 
 @app.post("/stop")

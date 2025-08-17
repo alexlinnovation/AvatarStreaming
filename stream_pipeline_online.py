@@ -339,7 +339,7 @@ class StreamSDK:
         # ======== Audio Feat Buffer ========
         self.reset_audio_features()
         # ======== Setup Worker Threads ========
-        QUEUE_MAX_SIZE = 0
+        QUEUE_MAX_SIZE = 150000
         # self.QUEUE_TIMEOUT = None
 
         self.audio2motion_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
@@ -393,18 +393,18 @@ class StreamSDK:
             # Encode frame to JPEG
             success, frame_data = cv2.imencode(".jpg", frame_bgr)
 
-            if not self.fps_tracker.is_running:
-                self.fps_tracker.start()
+            # if not self.fps_tracker.is_running:
+            #     self.fps_tracker.start()
 
-            self.fps_tracker.update(1)
+            # self.fps_tracker.update(1)
 
-            if self.fps_tracker.total_frames == 1:
-                logger.info(
-                    f"Time until first frame: {time.monotonic() - self.start_processing_time}"
-                )
+            # if self.fps_tracker.total_frames == 1:
+            #     logger.info(
+            #         f"Time until first frame: {time.monotonic() - self.start_processing_time}"
+            #     )
 
-            if gen_frame_idx % 25 == 0:
-                self.fps_tracker.log()
+            # if gen_frame_idx % 25 == 0:
+            #     self.fps_tracker.log()
 
             self.frame_queue.put([frame_data.tobytes(), frame_idx, gen_frame_idx])
             self.putback_queue.task_done()
@@ -648,9 +648,9 @@ class StreamSDK:
                 audio_feat = np.concatenate([audio_feat, item_buffer], 0)
                 item_buffer = np.zeros((0, aud_feat_dim), dtype=np.float32)
 
-            logger.debug(
-                f"Processing new frames batch processing frames={processing_frames} is_end={is_end}"
-            )
+            # logger.debug(
+            #     f"Processing new frames batch processing frames={processing_frames} is_end={is_end}"
+            # )
 
             while True:
                 if self.stop_event.is_set():

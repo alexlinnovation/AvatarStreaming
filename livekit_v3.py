@@ -37,7 +37,7 @@ API_SECRET = "XCWjdkZbDW2oj56f0eJjStwLEga2FRfMJzvfJ09WN7aB"
 FPS_1 = 25
 FPS_2 = 25
 CHUNK_SIZE = (2, 4, 2)
-SAMPLING_TIMESTEP = 12
+SAMPLING_TIMESTEP = 10
 RESOLUTION = 1080
 BUFFER = 320
 SILENCE_BUFFER = 320
@@ -229,7 +229,6 @@ class AvatarSession:
                     self.sdk.process_audio_chunk(vis)
                 pos += BUFFER
             await asyncio.sleep(0)
-        
         if self.silence_task is None:
             self.silence_task = self.loop.create_task(self._silence_loop())
 
