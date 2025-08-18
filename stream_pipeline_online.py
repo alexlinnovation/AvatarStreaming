@@ -339,7 +339,7 @@ class StreamSDK:
         # ======== Audio Feat Buffer ========
         self.reset_audio_features()
         # ======== Setup Worker Threads ========
-        QUEUE_MAX_SIZE = 150000
+        QUEUE_MAX_SIZE = 150
         # self.QUEUE_TIMEOUT = None
 
         self.audio2motion_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
@@ -779,8 +779,12 @@ class StreamSDK:
         self.hubert_features_queue.queue.clear()
         self.motion_stitch_out_queue.queue.clear()
 
+        # CRITICAL FIX: Reset counters BEFORE setting reset flag
         self.expected_frames.set(0)
         self.pending_frames.set(0)
+        self.starting_gen_frame_idx = 0  # NEW: Reset this too
+        
+        # Now reset audio features
         self.reset_audio_features()
 
     def reset_audio_features(self):
@@ -812,7 +816,7 @@ class StreamSDK:
 
         # Process audio
         self.hubert_features_queue.put(audio_chunk)
-
+        
         self.expected_frames.increment(self.chunk_size[1])
         self.pending_frames.increment(self.chunk_size[1])
 

@@ -47,7 +47,7 @@ class GatedAVSynchronizer:
             maxsize=50
         )
         self._audio_queue: asyncio.Queue[tuple[LKAudioFrame, Optional[float]]] = asyncio.Queue(
-            maxsize=50
+            maxsize=60
         )
 
         # Backlog / catch-up policy (structural, not tuning)
@@ -62,6 +62,9 @@ class GatedAVSynchronizer:
         # Tasks
         self._t_video = asyncio.create_task(self._drain_video())
         self._t_audio = asyncio.create_task(self._drain_audio())
+        self._audio_wall_next = None
+        self._audio_dt_default = 0.02
+
 
     async def push(
         self,

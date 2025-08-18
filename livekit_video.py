@@ -90,25 +90,6 @@ class AvatarSession:
         self.video_frames = 0
         self.FPS = FPS_2
 
-    async def _silence_loop(self):
-        zero_audio = np.zeros(SILENCE_BUFFER, np.float32)
-        zero_i16 = (zero_audio * 32767).astype(np.int16).tobytes()
-        zero_visual = np.zeros(self.SPL, np.float32)
-        rate = 16_000
-        pos = 0
-        while True:
-            ts = self.samples_pushed / rate
-            frame = rtc.AudioFrame(zero_i16, rate, 1, SILENCE_BUFFER)
-            await self.av_sync.push(frame, ts)
-            self.samples_pushed += SILENCE_BUFFER
-            if pos % self.present == 0:
-                self.sdk.process_audio_chunk(zero_visual)
-            pos += SILENCE_BUFFER
-            try:
-                await asyncio.sleep(SILENCE_BUFFER / rate)
-            except asyncio.CancelledError:
-                break
-
     async def offer(self):
         token = (
             api.AccessToken(API_KEY, API_SECRET)
@@ -197,6 +178,25 @@ class AvatarSession:
                     self.samples_pushed += BUFFER
                 self.buffered_audio.clear()
             await asyncio.sleep(rate)
+            
+    async def _silence_loop(self):
+        zero_audio = np.zeros(SILENCE_BUFFER, np.float32)
+        zero_i16 = (zero_audio * 32767).astype(np.int16).tobytes()
+        zero_visual = np.zeros(self.SPL, np.float32)
+        rate = 16_000
+        pos = 0
+        while True:
+            ts = self.samples_pushed / rate
+            frame = rtc.AudioFrame(zero_i16, rate, 1, SILENCE_BUFFER)
+            await self.av_sync.push(frame, ts)
+            self.samples_pushed += SILENCE_BUFFER
+            if pos % self.present == 0:
+                self.sdk.process_audio_chunk(zero_visual)
+            pos += SILENCE_BUFFER
+            try:
+                await asyncio.sleep(SILENCE_BUFFER / rate)
+            except asyncio.CancelledError:
+                break
 
     async def speak(self, text: str, voice: str = "af_heart"):
         if self.silence_task:
@@ -229,6 +229,15 @@ class AvatarSession:
                     self.sdk.process_audio_chunk(vis)
                 pos += BUFFER
             await asyncio.sleep(0)
+        
+        self.sdk.audio2motion_queue.queue.clear()
+        self.sdk.motion_stitch_queue.queue.clear()
+        self.sdk.putback_queue.queue.clear()
+        self.sdk.hubert_features_queue.queue.clear()
+        
+        self.sdk.motion_stitch_out_queue.queue.clear()
+        # self.sdk.warp_f3d_queue.queue.clear()
+        self.sdk.decode_f3d_queue.queue.clear()
         
         if self.silence_task is None:
             self.silence_task = self.loop.create_task(self._silence_loop())
