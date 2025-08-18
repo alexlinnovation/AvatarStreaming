@@ -304,6 +304,7 @@ class ConfigReq(BaseModel):
     CHUNK_SIZE: Optional[List[int]] = None
     SAMPLING_TIMESTEP: Optional[int] = None
 
+
 @app.post("/offer", response_model=OfferResp)
 async def offer_endpoint(req: OfferReq):
     room = req.room.strip()
