@@ -320,7 +320,7 @@ class StreamSDK:
             N_d=self.N_d,
             use_d_keys=self.use_d_keys,
             relative_d=self.relative_d,
-            drive_eye=self.drive_eye,
+            drive_eye=True,
             delta_eye_arr=self.delta_eye_arr,
             delta_eye_open_n=self.delta_eye_open_n,
             fade_out_keys=self.fade_out_keys,
