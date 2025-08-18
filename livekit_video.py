@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # avatar_livekit_fixed.py  – StreamSDK avatar → LiveKit Cloud  (idle / speak API)
 # ------------------------------------------------------------------------------
-from gated_avsync import GatedAVSynchronizer
+from src.gated_avsync import GatedAVSynchronizer
 import collections
 import asyncio, logging, uuid, time, io, queue, threading
 import numpy as np, torch, torchaudio, av
