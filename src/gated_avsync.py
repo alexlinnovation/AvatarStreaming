@@ -24,7 +24,7 @@ class GatedAVSynchronizer:
         video_source: VideoSource,
         video_fps: float,
         video_queue_size_ms: float = 100,
-        allowed_audio_lead_ms: float = 0.0,
+        allowed_audio_lead_ms: float = 20.0,
         _max_delay_tolerance_ms: float = 100,
     ):
         self._audio_source = audio_source
@@ -44,10 +44,10 @@ class GatedAVSynchronizer:
         # Queues
         self._video_queue_max = max(1, int(self._video_fps * self._video_queue_size_secs))
         self._video_queue: asyncio.Queue[tuple[LKVideoFrame, Optional[float]]] = asyncio.Queue(
-            maxsize=80
+            maxsize=60
         )
         self._audio_queue: asyncio.Queue[tuple[LKAudioFrame, Optional[float]]] = asyncio.Queue(
-            maxsize=80
+            maxsize=60
         )
 
         # Backlog / catch-up policy (structural, not tuning)

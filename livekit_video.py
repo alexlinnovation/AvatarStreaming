@@ -332,17 +332,21 @@ async def _consume_stt_stream(session: AvatarSession, stream):
                 if len(text) < 2:
                     continue
 
-                if session.speak_lock.locked():
-                    continue
-
+                # append user message immediately
                 hist = _chat_history.setdefault(session.room_name, [])
                 hist.append({"role": "user", "content": text})
 
-                reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
-                if reply:
-                    async with session.speak_lock:
-                        await session.speak(reply, session.voice)
-                    hist.append({"role": "assistant", "content": reply})
+                # offload GPT + speak to background, don't block STT loop
+                async def handle_reply(user_text: str):
+                    reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
+                    if reply:
+                        async with session.speak_lock:
+                            await session.speak(reply, session.voice)
+                        hist.append({"role": "assistant", "content": reply})
+
+                if not session.speak_lock.locked():
+                    asyncio.create_task(handle_reply(text))
+
     finally:
         await stream.aclose()
 
