@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # avatar_livekit_fixed.py  – StreamSDK avatar → LiveKit Cloud  (idle / speak API)
 # ------------------------------------------------------------------------------
+import json
 from src.gated_avsync import GatedAVSynchronizer
 import collections
 import asyncio, logging, uuid, time, io, queue, threading
@@ -16,6 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from livekit.agents.stt import SpeechEventType, SpeechEvent
+from livekit.plugins import deepgram
+import aiohttp
+from openai import AsyncOpenAI
 
 log = logging.getLogger("speak_debug")
 log.setLevel(logging.INFO)
@@ -33,6 +38,9 @@ app.add_middleware(
 LIVEKIT_URL = "wss://wdqwd-i503xu0n.livekit.cloud"
 API_KEY = "APIewTmSoRk6rFS"
 API_SECRET = "XCWjdkZbDW2oj56f0eJjStwLEga2FRfMJzvfJ09WN7aB"
+DEEPGRAM_API_KEY="f37043ae1b11b119212b8e75f7cc59b8ca722ac2"
+OPEN_AI_KEY = "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"
+FORWARD_INTERIM = True
 
 FPS_1 = 25
 FPS_2 = 25
@@ -44,6 +52,7 @@ SILENCE_BUFFER = 320
 
 _resampler = None
 _resampler_lock = threading.Lock()
+openai_client = AsyncOpenAI(api_key=OPEN_AI_KEY)
 
 def get_resampler():
     global _resampler
@@ -70,7 +79,7 @@ def viewer_token(room: str) -> str:
     )
 
 class AvatarSession:
-    def __init__(self, room: str, avatar_png: str):
+    def __init__(self, room: str, avatar_png: str, voice: str = "af_heart", name: Optional[str] = "Alice", desc: Optional[str] = "Interview assistant"):
         self.room_name = room
         self.avatar_png = avatar_png
         self.loop = asyncio.get_event_loop()
@@ -89,6 +98,33 @@ class AvatarSession:
         self.buffered_audio: List[bytes] = []
         self.video_frames = 0
         self.FPS = FPS_2
+        self.http_session: aiohttp.ClientSession | None = None
+        self.speak_lock = asyncio.Lock()
+        self.ready_event = asyncio.Event()
+        self.voice = voice
+        self.name = name
+        self.desc = desc
+        
+    async def _run_stt_for_track(self, track: rtc.RemoteAudioTrack):
+        await self.ready_event.wait()
+        stt = deepgram.STT(
+            model="nova-3",
+            api_key=DEEPGRAM_API_KEY,
+            http_session=self.http_session,
+            punctuate=False,
+            smart_format=False,
+        )
+        stt_stream = stt.stream()
+        audio_stream = rtc.AudioStream(track)
+        stt_task = asyncio.create_task(_consume_stt_stream(self, stt_stream))
+        try:
+            async for evt in audio_stream:
+                frame = evt.frame if hasattr(evt, "frame") else evt
+                stt_stream.push_frame(frame)
+        finally:
+            stt_stream.end_input()
+            await stt_task
+
 
     async def offer(self):
         token = (
@@ -99,6 +135,25 @@ class AvatarSession:
         )
         self.lk_room = rtc.Room()
         await self.lk_room.connect(LIVEKIT_URL, token)
+        if self.http_session is None:
+            timeout = aiohttp.ClientTimeout(
+                total=None,
+                connect=10,
+                sock_connect=10,
+                sock_read=120,
+            )
+            connector = aiohttp.TCPConnector(
+                limit=64,
+                ttl_dns_cache=300,
+                ssl=False,
+            )
+            self.http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+            
+        @self.lk_room.on("track_subscribed")
+        def _on_track_subscribed(track: rtc.RemoteTrack):
+            if isinstance(track, rtc.RemoteAudioTrack):
+                asyncio.create_task(self._run_stt_for_track(track))
+
         vs = rtc.VideoSource(1080, 800)
         asrc = rtc.AudioSource(16_000, 1, 1000)
         vtr = rtc.LocalVideoTrack.create_video_track("v", vs)
@@ -136,6 +191,7 @@ class AvatarSession:
         self._start_video_thread()
         self.video_task = self.loop.create_task(self._video_loop_push())
         self.silence_task = self.loop.create_task(self._silence_loop())
+        self.ready_event.set()
         
     async def _greet_when_ready(self, text: str, voice: str):
         while self.video_frames == 0:
@@ -209,7 +265,7 @@ class AvatarSession:
         rate = 16_000
         pos = 0
         buf = np.empty(0, np.float32)
-        async for chunk24, _ in self.kokoro.create_stream(text, voice=voice, speed=1.0, lang="en-us"):
+        async for chunk24, _ in self.kokoro.create_stream(text, voice=voice, speed=0.9, lang="en-us"):
             buf = np.concatenate([buf, resample(chunk24)])
             while len(buf) >= BUFFER:
                 frame, buf = buf[:BUFFER], buf[BUFFER:]
@@ -267,13 +323,80 @@ class AvatarSession:
                 self.sdk.close()
             except Exception:
                 pass
+            
+async def _consume_stt_stream(session: AvatarSession, stream):
+    try:
+        async for ev in stream:
+            if ev.type == SpeechEventType.FINAL_TRANSCRIPT:
+                text = ev.alternatives[0].text.strip()
+                if len(text) < 2:
+                    continue
+
+                if session.speak_lock.locked():
+                    continue
+
+                hist = _chat_history.setdefault(session.room_name, [])
+                hist.append({"role": "user", "content": text})
+
+                reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
+                if reply:
+                    async with session.speak_lock:
+                        await session.speak(reply, session.voice)
+                    hist.append({"role": "assistant", "content": reply})
+    finally:
+        await stream.aclose()
+
+    
+async def gpt4mini_reply(room: str, name: str, desc: str, max_tokens: int = 200) -> str | None:
+    try:
+        hist = _chat_history.get(room, [])
+
+        # Branching system instructions
+        if "interview" in (desc or "").lower():
+            role_instructions = (
+                f"Your name is {name}, you are simulating an {desc}. "
+                "Instead of asking the candidate what they applied for, "
+                "assume a dummy job title (e.g., 'Software Engineer') has been provided. "
+                "Lead the interview with concise questions and 1–2 sentence responses."
+            )
+        elif "customer service" in (desc or "").lower():
+            role_instructions = (
+                f"Your name is {name}, you are simulating an {desc}. "
+                "Your product is digital avatars (has API) "
+                "engage and lead the conversation. "
+                "Stay concise in 1–2 sentences and keep the conversation flowing."
+            )
+        else:
+            role_instructions = (
+                f"Your name is {name}, your role is {desc}. "
+                "You are designed for realtime STT. "
+                "Always lead the conversation politely, "
+                "ask engaging questions, and reply concisely in 1–2 sentences."
+            )
+
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": role_instructions},
+                *hist[-8:],
+            ],
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"GPT error: {e}")
+        return None
+
 
 _sessions: Dict[str, AvatarSession] = {}
+_chat_history: Dict[str, List[dict]] = {}
 
 class OfferReq(BaseModel):
     room: str
     input_image: Optional[str] = "static/avatar.png"
     voice: Optional[str] = "af_heart"
+    name: Optional[str] = None
+    desc: Optional[str] = None
 
 class OfferResp(BaseModel):
     room: str
@@ -312,15 +435,32 @@ async def offer_endpoint(req: OfferReq):
         raise HTTPException(400, "room must not be empty")
     if room in _sessions:
         raise HTTPException(409, "room already exists")
-    ses = AvatarSession(room, req.input_image or "static/avatar.png")
+
+    ses = AvatarSession(
+        room,
+        req.input_image or "static/avatar.png",
+        req.voice or "af_heart",
+        req.name or "Assistant",
+        req.desc or "Realtime assistant"
+    )
     await ses.offer()
     _sessions[room] = ses
-    asyncio.create_task(
-        ses._greet_when_ready(
-            "...Hello, nice to meet you, how can I help you today?",
-            req.voice or "af_heart",
-        )
-    )
+
+    _chat_history[room] = [
+        {
+            "role": "system",
+            "content": "You are an assistant designed for realtime STT. "
+                       "Lead the conversation politely. Start by introducing yourself "
+                       "and asking an opening question to engage the user."
+        }
+    ]
+    async def _intro_task():
+        reply = await gpt4mini_reply(room, max_tokens=40, name=ses.name, desc=ses.desc)
+        if reply:
+            await ses._greet_when_ready(reply, ses.voice)
+            _chat_history[room].append({"role": "assistant", "content": reply})
+
+    asyncio.create_task(_intro_task())
     return OfferResp(room=room, url=LIVEKIT_URL, token=viewer_token(room))
 
 @app.post("/speak")
@@ -334,6 +474,7 @@ async def speak_endpoint(req: SpeakReq):
 @app.post("/stop")
 async def stop_endpoint(req: StopReq):
     ses = _sessions.pop(req.room, None)
+    _chat_history.pop(req.room, None)
     if not ses:
         raise HTTPException(404, "room not found")
     await ses.stop()
