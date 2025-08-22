@@ -41,7 +41,7 @@ API_SECRET = "XCWjdkZbDW2oj56f0eJjStwLEga2FRfMJzvfJ09WN7aB"
 DEEPGRAM_API_KEY="f37043ae1b11b119212b8e75f7cc59b8ca722ac2"
 OPEN_AI_KEY = "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"
 FORWARD_INTERIM = True
-Enable_STT = False
+ENABLE_STT = True
 
 FPS_1 = 25
 FPS_2 = 25
@@ -51,7 +51,15 @@ RESOLUTION = 1080
 BUFFER = 320
 SILENCE_BUFFER = 320
 
+# Internal audio rate for processing/SDK
+INTERNAL_RATE = 16_000
+# Output audio rate for LiveKit
+OUT_RATE = 48_000
+OUT_BUFFER = BUFFER * (OUT_RATE // INTERNAL_RATE) 
+OUT_SILENCE_BUFFER = SILENCE_BUFFER * (OUT_RATE // INTERNAL_RATE)
+
 _resampler = None
+_resampler_out = None
 _resampler_lock = threading.Lock()
 openai_client = AsyncOpenAI(api_key=OPEN_AI_KEY)
 
@@ -59,17 +67,33 @@ def get_resampler():
     global _resampler
     with _resampler_lock:
         if _resampler is None:
-            _resampler = torchaudio.transforms.Resample(24_000, 16_000).cuda()
+            # CPU resampler (avoid GPU round-trips per 20ms frame)
+            _resampler = torchaudio.transforms.Resample(24_000, INTERNAL_RATE)
         return _resampler
-    
+
+def get_resampler_out():
+    global _resampler_out
+    with _resampler_lock:
+        if _resampler_out is None:
+            # CPU resampler (avoid GPU round-trips per 20ms frame)
+            _resampler_out = torchaudio.transforms.Resample(INTERNAL_RATE, OUT_RATE)
+        return _resampler_out
+
 def _drain(q: queue.Queue):
     while True:
         try: q.get_nowait()
         except queue.Empty: return
 
-def resample(w: np.ndarray) -> np.ndarray:
+def resample_to_16k(w: np.ndarray) -> np.ndarray:
     resampler = get_resampler()
-    return resampler(torch.from_numpy(w).cuda().unsqueeze(0)).squeeze(0).cpu().numpy()
+    # CPU tensor, keep contiguous to minimize copies
+    t = torch.from_numpy(w.astype(np.float32, copy=False)).unsqueeze(0)
+    return resampler(t).squeeze(0).numpy()
+
+def upsample_to_48k(w16: np.ndarray) -> np.ndarray:
+    resampler_out = get_resampler_out()
+    t = torch.from_numpy(w16.astype(np.float32, copy=False)).unsqueeze(0)
+    return resampler_out(t).squeeze(0).numpy()
 
 def viewer_token(room: str) -> str:
     return (
@@ -105,21 +129,6 @@ class AvatarSession:
         self.voice = voice
         self.name = name
         self.desc = desc
-        self._audio_ready_sent = False
-        self._video_ready_sent = False
-        
-    async def _signal_audio_ready(self):
-        if self._audio_ready_sent or not self.lk_room:
-            return
-        self._audio_ready_sent = True
-        try:
-            payload = json.dumps({"ok": True, "ts": time.time()}).encode("utf-8")
-            # topic can be anything; we'll listen for this on the frontend
-            await self.lk_room.local_participant.publish_data(
-                payload, reliable=True, topic="agent_audio_ready"
-            )
-        except Exception as e:
-            logging.warning(f"publish_data(agent_audio_ready) failed: {e}")
         
     async def _run_stt_for_track(self, track: rtc.RemoteAudioTrack):
         await self.ready_event.wait()
@@ -167,11 +176,12 @@ class AvatarSession:
             
         @self.lk_room.on("track_subscribed")
         def _on_track_subscribed(track: rtc.RemoteTrack):
-            if isinstance(track, rtc.RemoteAudioTrack) and Enable_STT:
+            if ENABLE_STT and isinstance(track, rtc.RemoteAudioTrack):
                 asyncio.create_task(self._run_stt_for_track(track))
 
         vs = rtc.VideoSource(1080, 800)
-        asrc = rtc.AudioSource(16_000, 1, 1000)
+        # Switch LiveKit audio source to 48k with 20ms buffer (avoid 1s internal latency)
+        asrc = rtc.AudioSource(OUT_RATE, 1, 20)
         vtr = rtc.LocalVideoTrack.create_video_track("v", vs)
         atr = rtc.LocalAudioTrack.create_audio_track("a", asrc)
         await self.lk_room.local_participant.publish_track(vtr)
@@ -202,7 +212,7 @@ class AvatarSession:
         )
         self.kokoro = Kokoro.from_session(sess, "checkpoints/voices-v1.0.bin")
         self.present = self.sdk.chunk_size[1] * 640
-        self.SPL = int(sum(self.sdk.chunk_size) * 16_000 / self.FPS) + 80
+        self.SPL = int(sum(self.sdk.chunk_size) * INTERNAL_RATE / self.FPS) + 80
         self.sdk.start_processing_audio()
         self._start_video_thread()
         self.video_task = self.loop.create_task(self._video_loop_push())
@@ -244,29 +254,29 @@ class AvatarSession:
             self.video_frames += 1
             if self.video_frames == 1 and self.buffered_audio:
                 for af_bytes in self.buffered_audio:
-                    ts_flush = self.samples_pushed / 16_000
-                    af = rtc.AudioFrame(af_bytes, 16_000, 1, BUFFER)
+                    ts_flush = self.samples_pushed / OUT_RATE
+                    af = rtc.AudioFrame(af_bytes, OUT_RATE, 1, OUT_BUFFER)
                     await self.av_sync.push(af, ts_flush)
-                    self.samples_pushed += BUFFER
+                    self.samples_pushed += OUT_BUFFER
                 self.buffered_audio.clear()
             await asyncio.sleep(rate)
             
     async def _silence_loop(self):
         zero_audio = np.zeros(SILENCE_BUFFER, np.float32)
-        zero_i16 = (zero_audio * 32767).astype(np.int16).tobytes()
+        zero_i16_out = (upsample_to_48k(zero_audio) * 32767).astype(np.int16).tobytes()
         zero_visual = np.zeros(self.SPL, np.float32)
-        rate = 16_000
+        rate_out = OUT_RATE
         pos = 0
         while True:
-            ts = self.samples_pushed / rate
-            frame = rtc.AudioFrame(zero_i16, rate, 1, SILENCE_BUFFER)
+            ts = self.samples_pushed / rate_out
+            frame = rtc.AudioFrame(zero_i16_out, rate_out, 1, OUT_SILENCE_BUFFER)
             await self.av_sync.push(frame, ts)
-            self.samples_pushed += SILENCE_BUFFER
+            self.samples_pushed += OUT_SILENCE_BUFFER
             if pos % self.present == 0:
                 self.sdk.process_audio_chunk(zero_visual)
             pos += SILENCE_BUFFER
             try:
-                await asyncio.sleep(SILENCE_BUFFER / rate)
+                await asyncio.sleep(SILENCE_BUFFER / INTERNAL_RATE)
             except asyncio.CancelledError:
                 break
 
@@ -278,24 +288,24 @@ class AvatarSession:
             except asyncio.CancelledError:
                 pass
             self.silence_task = None
-        rate = 16_000
+        rate = INTERNAL_RATE
         pos = 0
         buf = np.empty(0, np.float32)
         async for chunk24, _ in self.kokoro.create_stream(text, voice=voice, speed=0.9, lang="en-us"):
-            buf = np.concatenate([buf, resample(chunk24)])
+            buf = np.concatenate([buf, resample_to_16k(chunk24)])
             while len(buf) >= BUFFER:
-                frame, buf = buf[:BUFFER], buf[BUFFER:]
-                af_bytes = (frame * 32767).astype(np.int16).tobytes()
+                frame16, buf = buf[:BUFFER], buf[BUFFER:]
+                # upsample to 48k just before player
+                frame48 = upsample_to_48k(frame16)
+                af_bytes = (frame48 * 32767).astype(np.int16).tobytes()
                 if self.video_frames == 0:
                     self.buffered_audio.append(af_bytes)
-                    self.samples_pushed += BUFFER
+                    self.samples_pushed += OUT_BUFFER
                 else:
-                    ts = self.samples_pushed / rate
-                    af = rtc.AudioFrame(af_bytes, rate, 1, BUFFER)
+                    ts = self.samples_pushed / OUT_RATE
+                    af = rtc.AudioFrame(af_bytes, OUT_RATE, 1, OUT_BUFFER)
                     await self.av_sync.push(af, ts)
-                    self.samples_pushed += BUFFER
-                if not self._audio_ready_sent:
-                    await self._signal_audio_ready()
+                    self.samples_pushed += OUT_BUFFER
                 if pos % self.present == 0:
                     vis = buf[: self.SPL]
                     if vis.size < self.SPL:
@@ -350,21 +360,21 @@ async def _consume_stt_stream(session: AvatarSession, stream):
                 if len(text) < 2:
                     continue
 
-                if session.speak_lock.locked():
-                    continue
-
+                # append user message immediately
                 hist = _chat_history.setdefault(session.room_name, [])
                 hist.append({"role": "user", "content": text})
 
-                # Fetch GPT reply first, before touching speak
-                reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
-                if not reply:
-                    continue
+                # offload GPT + speak to background, don't block STT loop
+                async def handle_reply(user_text: str):
+                    reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
+                    if reply:
+                        async with session.speak_lock:
+                            await session.speak(reply, session.voice)
+                        hist.append({"role": "assistant", "content": reply})
 
-                async with session.speak_lock:
-                    # Only now start speak, no silence-padding drift
-                    await session.speak(reply, session.voice)
-                hist.append({"role": "assistant", "content": reply})
+                if not session.speak_lock.locked():
+                    asyncio.create_task(handle_reply(text))
+
     finally:
         await stream.aclose()
 
@@ -468,27 +478,21 @@ async def offer_endpoint(req: OfferReq):
     await ses.offer()
     _sessions[room] = ses
 
-    # _chat_history[room] = [
-    #     {
-    #         "role": "system",
-    #         "content": "You are an assistant designed for realtime STT. "
-    #                    "Lead the conversation politely. Start by introducing yourself "
-    #                    "and asking an opening question to engage the user."
-    #     }
-    # ]
-    # async def _intro_task():
-    #     reply = await gpt4mini_reply(room, max_tokens=40, name=ses.name, desc=ses.desc)
-    #     if reply:
-    #         await ses._greet_when_ready(reply, ses.voice)
-    #         _chat_history[room].append({"role": "assistant", "content": reply})
+    _chat_history[room] = [
+        {
+            "role": "system",
+            "content": "You are an assistant designed for realtime STT. "
+                       "Lead the conversation politely. Start by introducing yourself "
+                       "and asking an opening question to engage the user."
+        }
+    ]
+    async def _intro_task():
+        reply = await gpt4mini_reply(room, max_tokens=40, name=ses.name, desc=ses.desc)
+        if reply:
+            await ses._greet_when_ready(reply, ses.voice)
+            _chat_history[room].append({"role": "assistant", "content": reply})
 
-    # asyncio.create_task(_intro_task())
-    asyncio.create_task(
-        ses._greet_when_ready(
-            f"...Hello, nice to meet you, my name is {req.name}, I am your {req.desc}, and how can I help you today?",
-            req.voice or "af_heart",
-        )
-    )
+    asyncio.create_task(_intro_task())
     return OfferResp(room=room, url=LIVEKIT_URL, token=viewer_token(room))
 
 @app.post("/speak")

@@ -8,9 +8,6 @@ import asyncio, logging, uuid, time, io, queue, threading
 import numpy as np, torch, torchaudio, av
 from PIL import Image
 from livekit import api, rtc
-# NOTE: Kokoro/ORT removed because Indonesian TTS now uses OpenAI TTS (wav → PCM)
-# import onnxruntime as ort
-# from kokoro_onnx import Kokoro
 from stream_pipeline_online import StreamSDK
 from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException
@@ -42,7 +39,7 @@ API_SECRET = "XCWjdkZbDW2oj56f0eJjStwLEga2FRfMJzvfJ09WN7aB"
 DEEPGRAM_API_KEY="f37043ae1b11b119212b8e75f7cc59b8ca722ac2"
 OPEN_AI_KEY = "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"
 FORWARD_INTERIM = True
-ENABLE_STT = True  # set True to enable Indonesian STT from mic
+ENABLE_STT = True
 
 FPS_1 = 25
 FPS_2 = 25
@@ -54,7 +51,6 @@ SILENCE_BUFFER = 320
 
 openai_client = AsyncOpenAI(api_key=OPEN_AI_KEY)
 
-# --- helpers (resample + drain) ------------------------------------------------
 def _drain(q: queue.Queue):
     while True:
         try:
@@ -65,63 +61,44 @@ def _drain(q: queue.Queue):
 def _resample_1d_float32(wave: np.ndarray, src_hz: int, dst_hz: int) -> np.ndarray:
     if src_hz == dst_hz:
         return wave.astype(np.float32, copy=False)
-    # CPU resample is fine here; GPU not required
     rs = torchaudio.transforms.Resample(src_hz, dst_hz)
     with torch.inference_mode():
         out = rs(torch.from_numpy(wave).unsqueeze(0)).squeeze(0).cpu().numpy()
     return out.astype(np.float32, copy=False)
 
-# --- TTS (Bahasa Indonesia via OpenAI TTS → wav → float32 16k) -----------------
-async def tts_id_to_float16k(http: aiohttp.ClientSession, text: str, voice: str = "alloy") -> np.ndarray:
-    """
-    Returns mono float32 PCM at 16kHz for LiveKit/StreamSDK visemes.
-    Uses OpenAI TTS (no Azure). Language is inferred from Indonesian text.
-    """
-    url = "https://api.openai.com/v1/audio/speech"
-    headers = {
-        "Authorization": f"Bearer {OPEN_AI_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "gpt-4o-mini-tts",
-        "voice": "coral",         # choose any voice supported (e.g., alloy, verse, aria, etc.)
-        "input": text,
-        "format": "wav",        # request WAV for reliable decode
-    }
-    async with http.post(url, headers=headers, json=payload) as resp:
-        if resp.status != 200:
-            body = await resp.text()
-            raise RuntimeError(f"TTS HTTP {resp.status}: {body}")
-
-        wav_bytes = await resp.read()
-
-    # Decode WAV to float32 using PyAV, resample → 16k mono
-    container = av.open(io.BytesIO(wav_bytes))
+async def openai_tts_to_float16k(text: str) -> np.ndarray:
+    out = b""
+    async with openai_client.audio.speech.with_streaming_response.create(
+        model="gpt-4o-mini-tts",
+        voice="coral",
+        input=text,
+        response_format="mp3",
+        speed=0.9,
+    ) as resp:
+        async for chunk in resp.iter_bytes():
+            if chunk:
+                out += chunk
+    if not out:
+        return np.zeros(0, dtype=np.float32)
+    container = av.open(io.BytesIO(out))
     samples: List[np.ndarray] = []
     src_rate = None
-    num_channels = None
     for frame in container.decode(audio=0):
         src_rate = frame.sample_rate
-        pcm = frame.to_ndarray()  # (channels, n)
+        pcm = frame.to_ndarray()
         if pcm.ndim == 2:
-            num_channels = pcm.shape[0]
-            pcm = pcm.mean(axis=0)  # mixdown to mono
+            pcm = pcm.mean(axis=0)
         samples.append(pcm.astype(np.float32, copy=False))
     container.close()
-
     if not samples:
         return np.zeros(0, dtype=np.float32)
-
     pcm_all = np.concatenate(samples)
     if src_rate is None:
-        src_rate = 24000  # safe default if header missing
-
+        src_rate = 24000
     pcm_16k = _resample_1d_float32(pcm_all, src_rate, 16000)
-    # clamp to [-1,1] just in case
     np.clip(pcm_16k, -1.0, 1.0, out=pcm_16k)
     return pcm_16k
 
-# --- viewer token ---------------------------------------------------------------
 def viewer_token(room: str) -> str:
     return (
         api.AccessToken(API_KEY, API_SECRET)
@@ -130,14 +107,12 @@ def viewer_token(room: str) -> str:
         .to_jwt()
     )
 
-# --- Avatar session -------------------------------------------------------------
 class AvatarSession:
-    def __init__(self, room: str, avatar_png: str, voice: str = "alloy", name: Optional[str] = "Alice", desc: Optional[str] = "Asisten wawancara"):
+    def __init__(self, room: str, avatar_png: str, voice: str = "id-ID-GadisNeural", name: Optional[str] = "Alice", desc: Optional[str] = "Asisten wawancara"):
         self.room_name = room
         self.avatar_png = avatar_png
         self.loop = asyncio.get_event_loop()
         self.sdk = None
-        # self.kokoro = None  # removed
         self.lk_room = None
         self.av_sync = None
         self.video_task = None
@@ -154,19 +129,19 @@ class AvatarSession:
         self.http_session: aiohttp.ClientSession | None = None
         self.speak_lock = asyncio.Lock()
         self.ready_event = asyncio.Event()
-        self.voice = voice          # OpenAI TTS voice name
+        self.voice = voice
         self.name = name
         self.desc = desc
 
     async def _run_stt_for_track(self, track: rtc.RemoteAudioTrack):
         await self.ready_event.wait()
         stt = deepgram.STT(
-            model="nova-2",                 # Indonesian supported here
+            model="nova-2",
             api_key=DEEPGRAM_API_KEY,
             http_session=self.http_session,
             punctuate=True,
             smart_format=True,
-            language="id",                 # Bahasa Indonesia
+            language="multi",
         )
         stt_stream = stt.stream()
         audio_stream = rtc.AudioStream(track)
@@ -233,11 +208,6 @@ class AvatarSession:
             emo=4,
             drive_eye=True,
         )
-
-        # Indonesian flow: TTS is OpenAI; no Kokoro session
-        # sess = ort.InferenceSession(...)  # removed
-        # self.kokoro = Kokoro.from_session(...)
-
         self.present = self.sdk.chunk_size[1] * 640
         self.SPL = int(sum(self.sdk.chunk_size) * 16_000 / self.FPS) + 80
         self.sdk.start_processing_audio()
@@ -307,8 +277,7 @@ class AvatarSession:
             except asyncio.CancelledError:
                 break
 
-    async def speak(self, text: str, voice: str = "alloy"):
-        # Bahasa Indonesia TTS path (OpenAI TTS → 16k PCM)
+    async def speak(self, text: str, voice: str = "id-ID-GadisNeural"):
         if self.silence_task:
             self.silence_task.cancel()
             try:
@@ -316,13 +285,10 @@ class AvatarSession:
             except asyncio.CancelledError:
                 pass
             self.silence_task = None
-
         rate = 16_000
         pos = 0
-        # Generate full utterance, then stream by BUFFER frames to preserve gating
-        pcm_16k = await tts_id_to_float16k(self.http_session, text, voice=voice)
+        pcm_16k = await openai_tts_to_float16k(text)
         buf = pcm_16k.astype(np.float32, copy=False)
-
         idx = 0
         while idx + BUFFER <= buf.size:
             frame = buf[idx: idx + BUFFER]
@@ -335,25 +301,20 @@ class AvatarSession:
                 af = rtc.AudioFrame(af_bytes, rate, 1, BUFFER)
                 await self.av_sync.push(af, ts)
                 self.samples_pushed += BUFFER
-
             if (pos % self.present) == 0:
-                # feed viseme driver
                 vis = buf[idx: idx + self.SPL]
                 if vis.size < self.SPL:
                     vis = np.pad(vis, (0, self.SPL - vis.size))
                 self.sdk.process_audio_chunk(vis)
             pos += BUFFER
             idx += BUFFER
-            await asyncio.sleep(0)  # yield to loop
-
-        # cleanup queues to avoid drift between utterances
+            await asyncio.sleep(0)
         self.sdk.audio2motion_queue.queue.clear()
         self.sdk.motion_stitch_queue.queue.clear()
         self.sdk.putback_queue.queue.clear()
         self.sdk.hubert_features_queue.queue.clear()
         self.sdk.motion_stitch_out_queue.queue.clear()
         self.sdk.decode_f3d_queue.queue.clear()
-
         if self.silence_task is None:
             self.silence_task = self.loop.create_task(self._silence_loop())
 
@@ -382,7 +343,6 @@ class AvatarSession:
             except Exception:
                 pass
 
-# --- STT consumer → GPT (Bahasa Indonesia) ------------------------------------
 async def _consume_stt_stream(session: AvatarSession, stream):
     try:
         async for ev in stream:
@@ -390,48 +350,40 @@ async def _consume_stt_stream(session: AvatarSession, stream):
                 text = ev.alternatives[0].text.strip()
                 if len(text) < 2:
                     continue
-
                 hist = _chat_history.setdefault(session.room_name, [])
                 hist.append({"role": "user", "content": text})
-
                 async def handle_reply(user_text: str):
                     reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
                     if reply:
                         async with session.speak_lock:
                             await session.speak(reply, session.voice)
                         hist.append({"role": "assistant", "content": reply})
-
                 if not session.speak_lock.locked():
                     asyncio.create_task(handle_reply(text))
-
     finally:
         await stream.aclose()
 
 async def gpt4mini_reply(room: str, name: str, desc: str, max_tokens: int = 200) -> str | None:
-    """Force Indonesian replies from GPT."""
     try:
         hist = _chat_history.get(room, [])
-
-        # Bahasa Indonesia instructions (branch on desc but keep language consistent)
         if "wawancara" in (desc or "").lower() or "interview" in (desc or "").lower():
             role_instructions = (
                 f"Namamu {name}. Kamu mensimulasikan {desc}. "
                 "Jangan tanya lowongan apa; anggap peran 'Software Engineer'. "
-                "Bertanyalah singkat dan jawab dalam 1–2 kalimat. Gunakan Bahasa Indonesia."
+                "Bertanyalah singkat dan jawab dalam 1–2 kalimat. Gunakan Bahasa Indonesia (jangan kaku, istilah bisa mix bahasa inggris)."
             )
         elif "customer service" in (desc or "").lower():
             role_instructions = (
                 f"Namamu {name}. Kamu mensimulasikan {desc}. "
-                "Produkmu adalah avatar digital (punya API). "
-                "Pimpin percakapan, jawab ringkas 1–2 kalimat memakai Bahasa Indonesia."
+                "Produkmu adalah Bank Sakura Indonesia. "
+                "Pimpin percakapan, jawab ringkas 1–2 kalimat memakai Bahasa Indonesia (jangan kaku, bisa mix bahasa inggris)."
             )
         else:
             role_instructions = (
                 f"Namamu {name}. Peranmu: {desc}. "
                 "Sistem dirancang untuk STT realtime. "
-                "Selalu sopan, pancing percakapan, dan jawab ringkas 1–2 kalimat dalam Bahasa Indonesia."
+                "Selalu sopan, pancing percakapan, dan jawab ringkas 1–2 kalimat dalam Bahasa Indonesia (jangan kaku, bisa mix bahasa inggris)."
             )
-
         resp = await openai_client.chat.completions.create(
             model="gpt-4o-mini",
             max_tokens=max_tokens,
@@ -446,14 +398,13 @@ async def gpt4mini_reply(room: str, name: str, desc: str, max_tokens: int = 200)
         print(f"GPT error: {e}")
         return None
 
-# --- API models ----------------------------------------------------------------
 _sessions: Dict[str, AvatarSession] = {}
 _chat_history: Dict[str, List[dict]] = {}
 
 class OfferReq(BaseModel):
     room: str
     input_image: Optional[str] = "static/avatar.png"
-    voice: Optional[str] = "alloy"  # OpenAI TTS voice (Bahasa content)
+    voice: Optional[str] = "id-ID-GadisNeural"
     name: Optional[str] = None
     desc: Optional[str] = None
 
@@ -465,7 +416,7 @@ class OfferResp(BaseModel):
 class SpeakReq(BaseModel):
     room: str
     text: str
-    voice: Optional[str] = "alloy"
+    voice: Optional[str] = "id-ID-GadisNeural"
 
 class StopReq(BaseModel):
     room: str
@@ -486,7 +437,6 @@ class ConfigReq(BaseModel):
     CHUNK_SIZE: Optional[List[int]] = None
     SAMPLING_TIMESTEP: Optional[int] = None
 
-# --- Endpoints -----------------------------------------------------------------
 @app.post("/offer", response_model=OfferResp)
 async def offer_endpoint(req: OfferReq):
     room = req.room.strip()
@@ -494,33 +444,26 @@ async def offer_endpoint(req: OfferReq):
         raise HTTPException(400, "room must not be empty")
     if room in _sessions:
         raise HTTPException(409, "room already exists")
-
     ses = AvatarSession(
         room,
         req.input_image or "static/avatar.png",
-        req.voice or "alloy",
+        req.voice or "id-ID-GadisNeural",
         req.name or "Asisten",
         req.desc or "Asisten Realtime"
     )
     await ses.offer()
     _sessions[room] = ses
-
-    # Mulai percakapan dalam Bahasa Indonesia
     _chat_history[room] = [
         {
             "role": "system",
-            "content": "Kamu asisten untuk STT realtime. "
-                       "Mulailah dengan perkenalan singkat dalam Bahasa Indonesia "
-                       "dan ajukan satu pertanyaan pembuka."
+            "content": "Kamu asisten untuk STT realtime. Mulailah dengan perkenalan singkat dalam Bahasa Indonesia dan ajukan satu pertanyaan pembuka."
         }
     ]
-
     async def _intro_task():
         reply = await gpt4mini_reply(room, max_tokens=40, name=ses.name, desc=ses.desc)
         if reply:
-            await ses._greet_when_ready(reply, ses.voice)
+            await ses._greet_when_ready(reply, "id-ID-GadisNeural")
             _chat_history[room].append({"role": "assistant", "content": reply})
-
     asyncio.create_task(_intro_task())
     return OfferResp(room=room, url=LIVEKIT_URL, token=viewer_token(room))
 
@@ -529,7 +472,7 @@ async def speak_endpoint(req: SpeakReq):
     ses = _sessions.get(req.room)
     if not ses:
         raise HTTPException(404, "room not found")
-    await ses.speak(req.text, req.voice or "alloy")
+    await ses.speak(req.text, req.voice or "id-ID-GadisNeural")
     return {"status": "ok"}
 
 @app.post("/stop")

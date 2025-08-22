@@ -27,4 +27,4 @@ COPY . .
 
 # ───── EXPOSE PORT + RUN ──────────────────────────────────────
 EXPOSE 8010
-CMD ["uvicorn", "livekit_video:app", "--host", "0.0.0.0", "--port", "8010", "--reload"]
+CMD ["uvicorn", "livekit_video:app", "--host", "0.0.0.0", "--port", "8010", "--workers", "3"]

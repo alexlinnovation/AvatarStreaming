@@ -41,7 +41,7 @@ API_SECRET = "XCWjdkZbDW2oj56f0eJjStwLEga2FRfMJzvfJ09WN7aB"
 DEEPGRAM_API_KEY="f37043ae1b11b119212b8e75f7cc59b8ca722ac2"
 OPEN_AI_KEY = "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"
 FORWARD_INTERIM = True
-Enable_STT = False
+ENABLE_STT = True
 
 FPS_1 = 25
 FPS_2 = 25
@@ -61,11 +61,15 @@ def get_resampler():
         if _resampler is None:
             _resampler = torchaudio.transforms.Resample(24_000, 16_000).cuda()
         return _resampler
-    
-def _drain(q: queue.Queue):
-    while True:
-        try: q.get_nowait()
-        except queue.Empty: return
+
+def drop_fraction(q: queue.Queue, fraction: float = 0.75):
+    """Drop ~fraction of current items from the queue head."""
+    n = int(q.qsize() * fraction)
+    for _ in range(n):
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            break
 
 def resample(w: np.ndarray) -> np.ndarray:
     resampler = get_resampler()
@@ -105,21 +109,6 @@ class AvatarSession:
         self.voice = voice
         self.name = name
         self.desc = desc
-        self._audio_ready_sent = False
-        self._video_ready_sent = False
-        
-    async def _signal_audio_ready(self):
-        if self._audio_ready_sent or not self.lk_room:
-            return
-        self._audio_ready_sent = True
-        try:
-            payload = json.dumps({"ok": True, "ts": time.time()}).encode("utf-8")
-            # topic can be anything; we'll listen for this on the frontend
-            await self.lk_room.local_participant.publish_data(
-                payload, reliable=True, topic="agent_audio_ready"
-            )
-        except Exception as e:
-            logging.warning(f"publish_data(agent_audio_ready) failed: {e}")
         
     async def _run_stt_for_track(self, track: rtc.RemoteAudioTrack):
         await self.ready_event.wait()
@@ -167,7 +156,7 @@ class AvatarSession:
             
         @self.lk_room.on("track_subscribed")
         def _on_track_subscribed(track: rtc.RemoteTrack):
-            if isinstance(track, rtc.RemoteAudioTrack) and Enable_STT:
+            if ENABLE_STT and isinstance(track, rtc.RemoteAudioTrack):
                 asyncio.create_task(self._run_stt_for_track(track))
 
         vs = rtc.VideoSource(1080, 800)
@@ -294,8 +283,6 @@ class AvatarSession:
                     af = rtc.AudioFrame(af_bytes, rate, 1, BUFFER)
                     await self.av_sync.push(af, ts)
                     self.samples_pushed += BUFFER
-                if not self._audio_ready_sent:
-                    await self._signal_audio_ready()
                 if pos % self.present == 0:
                     vis = buf[: self.SPL]
                     if vis.size < self.SPL:
@@ -312,6 +299,7 @@ class AvatarSession:
         self.sdk.motion_stitch_out_queue.queue.clear()
         # self.sdk.warp_f3d_queue.queue.clear()
         self.sdk.decode_f3d_queue.queue.clear()
+        drop_fraction(self.sdk.warp_f3d_queue, 0.2)
         
         if self.silence_task is None:
             self.silence_task = self.loop.create_task(self._silence_loop())
@@ -350,21 +338,21 @@ async def _consume_stt_stream(session: AvatarSession, stream):
                 if len(text) < 2:
                     continue
 
-                if session.speak_lock.locked():
-                    continue
-
+                # append user message immediately
                 hist = _chat_history.setdefault(session.room_name, [])
                 hist.append({"role": "user", "content": text})
 
-                # Fetch GPT reply first, before touching speak
-                reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
-                if not reply:
-                    continue
+                # offload GPT + speak to background, don't block STT loop
+                async def handle_reply(user_text: str):
+                    reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
+                    if reply:
+                        async with session.speak_lock:
+                            await session.speak(reply, session.voice)
+                        hist.append({"role": "assistant", "content": reply})
 
-                async with session.speak_lock:
-                    # Only now start speak, no silence-padding drift
-                    await session.speak(reply, session.voice)
-                hist.append({"role": "assistant", "content": reply})
+                if not session.speak_lock.locked():
+                    asyncio.create_task(handle_reply(text))
+
     finally:
         await stream.aclose()
 
@@ -468,27 +456,21 @@ async def offer_endpoint(req: OfferReq):
     await ses.offer()
     _sessions[room] = ses
 
-    # _chat_history[room] = [
-    #     {
-    #         "role": "system",
-    #         "content": "You are an assistant designed for realtime STT. "
-    #                    "Lead the conversation politely. Start by introducing yourself "
-    #                    "and asking an opening question to engage the user."
-    #     }
-    # ]
-    # async def _intro_task():
-    #     reply = await gpt4mini_reply(room, max_tokens=40, name=ses.name, desc=ses.desc)
-    #     if reply:
-    #         await ses._greet_when_ready(reply, ses.voice)
-    #         _chat_history[room].append({"role": "assistant", "content": reply})
+    _chat_history[room] = [
+        {
+            "role": "system",
+            "content": "You are an assistant designed for realtime STT. "
+                       "Lead the conversation politely. Start by introducing yourself "
+                       "and asking an opening question to engage the user."
+        }
+    ]
+    async def _intro_task():
+        reply = await gpt4mini_reply(room, max_tokens=40, name=ses.name, desc=ses.desc)
+        if reply:
+            await ses._greet_when_ready(reply, ses.voice)
+            _chat_history[room].append({"role": "assistant", "content": reply})
 
-    # asyncio.create_task(_intro_task())
-    asyncio.create_task(
-        ses._greet_when_ready(
-            f"...Hello, nice to meet you, my name is {req.name}, I am your {req.desc}, and how can I help you today?",
-            req.voice or "af_heart",
-        )
-    )
+    asyncio.create_task(_intro_task())
     return OfferResp(room=room, url=LIVEKIT_URL, token=viewer_token(room))
 
 @app.post("/speak")

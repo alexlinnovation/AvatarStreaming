@@ -24,7 +24,7 @@ class GatedAVSynchronizer:
         video_source: VideoSource,
         video_fps: float,
         video_queue_size_ms: float = 100,
-        allowed_audio_lead_ms: float = 40.0,
+        allowed_audio_lead_ms: float = 20.0,
         _max_delay_tolerance_ms: float = 100,
     ):
         self._audio_source = audio_source
