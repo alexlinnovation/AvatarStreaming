@@ -20,3 +20,8 @@ class WarpF3D:
         out = self.warp_net(f_s, x_s, x_d)
         return out
     
+    def close(self):
+        try:
+            self.warp_net.close()  # or whatever you named the WarpNetwork field
+        except Exception:
+            pass

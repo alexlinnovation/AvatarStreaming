@@ -339,7 +339,7 @@ class StreamSDK:
         # ======== Audio Feat Buffer ========
         self.reset_audio_features()
         # ======== Setup Worker Threads ========
-        QUEUE_MAX_SIZE = 150
+        QUEUE_MAX_SIZE = 200
         # self.QUEUE_TIMEOUT = None
 
         self.audio2motion_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
@@ -881,3 +881,121 @@ class StreamSDK:
             and is_last_frame_in_queue
             and is_not_expecting_more_audio
         )
+        
+    def exit(self):
+        from contextlib import suppress
+        import gc
+        try:
+            import torch
+        except Exception:
+            torch = None
+
+        # idempotent
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+
+        # 1) Tell workers to stop and ensure no one is waiting for more audio
+        with suppress(Exception):
+            self.stop_event.set()
+        with suppress(Exception):
+            self.is_expecting_more_audio.clear()
+        with suppress(Exception):
+            self.hubert_finished.set()
+        with suppress(Exception):
+            self.reset_audio2motion_needed.set()
+
+        # 2) Wake any blocking queue.get() ASAP
+        qs = [
+            getattr(self, "hubert_features_queue", None),
+            getattr(self, "audio2motion_queue", None),
+            getattr(self, "motion_stitch_queue", None),
+            getattr(self, "motion_stitch_out_queue", None),
+            getattr(self, "warp_f3d_queue", None),
+            getattr(self, "decode_f3d_queue", None),
+            getattr(self, "putback_queue", None),
+            getattr(self, "frame_queue", None),
+        ]
+        for q in [q for q in qs if q is not None]:
+            with suppress(Exception):
+                for _ in range(8):
+                    q.put_nowait(None)
+
+        # 3) Join all worker threads (short timeout, don’t hang)
+        for th in list(getattr(self, "thread_list", [])):
+            with suppress(Exception):
+                th.join(timeout=2.0)
+        self.thread_list = []
+
+        # 4) Drain queues and drop them (release underlying deques)
+        for name in (
+            "hubert_features_queue","audio2motion_queue","motion_stitch_queue",
+            "motion_stitch_out_queue","warp_f3d_queue","decode_f3d_queue",
+            "putback_queue","frame_queue"
+        ):
+            q = getattr(self, name, None)
+            if q is not None:
+                with suppress(Exception):
+                    with q.mutex:
+                        q.queue.clear()
+                        q.all_tasks_done.notify_all()
+                        q.unfinished_tasks = 0
+                setattr(self, name, None)
+
+        # 5) Release heavy operators/models (GPU → CPU → None)
+        def _rel(x):
+            if not x:
+                return
+            for m in ("close","release","cleanup","destroy"):
+                fn = getattr(x, m, None)
+                if callable(fn):
+                    with suppress(Exception):
+                        fn()
+            to = getattr(x, "to", None)
+            if callable(to):
+                with suppress(Exception):
+                    to("cpu")
+
+        # If Audio2Motion wraps LMDM/TRT/ONNX
+        with suppress(Exception):
+            lmdm = getattr(self.audio2motion, "lmdm", None)
+            if lmdm and hasattr(lmdm, "close"):
+                lmdm.close()
+
+        _rel(getattr(self, "audio2motion", None))
+        _rel(getattr(self, "motion_stitch", None))
+        _rel(getattr(self, "warp_f3d", None))
+        _rel(getattr(self, "decode_f3d", None))
+        _rel(getattr(self, "wav2feat", None))
+        _rel(getattr(self, "condition_handler", None))
+        _rel(getattr(self, "avatar_registrar", None))
+        _rel(getattr(self, "putback", None))
+
+        self.audio2motion = None
+        self.motion_stitch = None
+        # self.warp_f3d = None
+        self.decode_f3d = None
+        
+        self.wav2feat = None
+        self.condition_handler = None
+        self.avatar_registrar = None
+        self.putback = None
+
+        self.source_info = None
+        self.ctrl_info = None
+        self.overall_ctrl_info = None
+        self.initial_audio_feat = None
+
+        with suppress(Exception):
+            self.fps_tracker.stop()
+
+        with suppress(Exception):
+            gc.collect()
+        if torch is not None and torch.cuda.is_available():
+            with suppress(Exception):
+                torch.cuda.synchronize()
+            with suppress(Exception):
+                torch.cuda.empty_cache()
+            with suppress(Exception):
+                torch.cuda.ipc_collect()
+

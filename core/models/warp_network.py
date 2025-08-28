@@ -10,6 +10,7 @@ class WarpNetwork:
         }
         self.model, self.model_type = load_model(model_path, device=device, **kwargs)
         self.device = device
+        self.closed = False  # <-- add
 
     def __call__(self, feature_3d, kp_source, kp_driving):
         """
@@ -33,3 +34,56 @@ class WarpNetwork:
             raise ValueError(f"Unsupported model type: {self.model_type}")
         
         return pred
+
+    def close(self):
+        if self.closed:
+            return
+        try:
+            m = self.model
+            if m is None:
+                return
+            if self.model_type == "pytorch":
+                try:
+                    import torch
+                    with torch.no_grad():
+                        to = getattr(m, "to", None)
+                        if callable(to):
+                            to("cpu")
+                except Exception:
+                    pass
+            elif self.model_type == "tensorrt":
+                # common TRT handles on custom wrappers
+                for attr in ("context", "engine", "runtime", "stream"):
+                    obj = getattr(m, attr, None)
+                    if hasattr(obj, "destroy"):
+                        try: obj.destroy()
+                        except Exception: pass
+                for meth in ("close", "destroy", "cleanup", "deinit"):
+                    fn = getattr(m, meth, None)
+                    if callable(fn):
+                        try: fn()
+                        except Exception: pass
+            elif self.model_type == "onnx":
+                # ORT sessions don't expose public close; dropping refs + GC is the path.
+                pass
+        finally:
+            self.model = None
+            self.closed = True
+            # best-effort GC + CUDA cache
+            try:
+                import gc; gc.collect()
+            except Exception:
+                pass
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache(); torch.cuda.ipc_collect()
+            except Exception:
+                pass
+
+    def __del__(self):
+        # safety net
+        try:
+            self.close()
+        except Exception:
+            pass

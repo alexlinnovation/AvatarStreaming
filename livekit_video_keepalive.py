@@ -53,6 +53,7 @@ SILENCE_BUFFER = 320
 
 openai_client = AsyncOpenAI(api_key=OPEN_AI_KEY)
 
+_GLOBAL_AVATAR = None
 
 class AvatarSession:
     def __init__(self, room: str, avatar_png: str, voice: str = "af_heart", name: Optional[str] = "Alice", desc: Optional[str] = "Interview assistant"):
@@ -83,7 +84,22 @@ class AvatarSession:
         self._audio_ready_sent = False
         self._video_ready_sent = False
         self.resampler = torchaudio.transforms.Resample(24000, 16000).cuda()
-    
+        self.first_greet_done = False
+
+    def _reset_session_state(self):
+        self.av_sync = None
+        self.video_task = None
+        self.silence_task = None
+        self.video_thread = None
+        self.video_frame_queue = None
+        self.video_thread_stop_event = None
+        self.samples_pushed = 0
+        self.buffered_audio = []
+        self.video_frames = 0
+        self._audio_ready_sent = False
+        self._video_ready_sent = False
+        self.ready_event = asyncio.Event()
+
     def _resample(self, w: np.ndarray) -> np.ndarray:
         return self.resampler(torch.from_numpy(w).cuda().unsqueeze(0)).squeeze(0).cpu().numpy()
         
@@ -93,12 +109,23 @@ class AvatarSession:
         self._audio_ready_sent = True
         try:
             payload = json.dumps({"ok": True, "ts": time.time()}).encode("utf-8")
-            # topic can be anything; we'll listen for this on the frontend
+            await self.lk_room.local_participant.publish_data(
+                payload, reliable=True, topic="agent_audio_ready"
+            )
+            self.first_greet_done = True
+        except Exception as e:
+            logging.warning(f"publish_data(agent_audio_ready) failed: {e}")
+
+    async def _republish_ready_for_new_viewers(self):
+        if not self.lk_room:
+            return
+        try:
+            payload = json.dumps({"ok": True, "ts": time.time()}).encode("utf-8")
             await self.lk_room.local_participant.publish_data(
                 payload, reliable=True, topic="agent_audio_ready"
             )
         except Exception as e:
-            logging.warning(f"publish_data(agent_audio_ready) failed: {e}")
+            logging.warning(f"publish_data(agent_audio_ready ping) failed: {e}")
         
     async def _run_stt_for_track(self, track: rtc.RemoteAudioTrack):
         await self.ready_event.wait()
@@ -120,8 +147,9 @@ class AvatarSession:
             stt_stream.end_input()
             await stt_task
 
-
     async def offer(self):
+        self._reset_session_state()
+
         token = (
             api.AccessToken(API_KEY, API_SECRET)
             .with_identity(f"py-ava-{uuid.uuid4().hex[:6]}")
@@ -162,24 +190,30 @@ class AvatarSession:
             video_fps=FPS_1,
         )
 
-        self.sdk = StreamSDK(
-            "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl",
-            "./checkpoints/ditto_trt_custom",
-            chunk_size=CHUNK_SIZE,
-        )
-        self.sdk.online_mode = True
-        self.sdk.setup(
-            self.avatar_png,
-            max_size=RESOLUTION,
-            sampling_timesteps=SAMPLING_TIMESTEP,
-            emo=4,
-            drive_eye=True,
-        )
-        sess = ort.InferenceSession(
-            "checkpoints/kokoro-v1.0.onnx",
-            providers=[("CUDAExecutionProvider", {"device_id": 0})],
-        )
-        self.kokoro = Kokoro.from_session(sess, "checkpoints/voices-v1.0.bin")
+        if self.sdk is None:
+            self.sdk = StreamSDK(
+                "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl",
+                "./checkpoints/ditto_trt_custom",
+                chunk_size=CHUNK_SIZE,
+            )
+            self.sdk.online_mode = True
+            self.sdk.setup(
+                self.avatar_png,
+                max_size=RESOLUTION,
+                sampling_timesteps=SAMPLING_TIMESTEP,
+                emo=4,
+                drive_eye=True,
+            )
+        else:
+            self.sdk.reset()
+
+        if self.kokoro is None:
+            sess = ort.InferenceSession(
+                "checkpoints/kokoro-v1.0.onnx",
+                providers=[("CUDAExecutionProvider", {"device_id": 0})],
+            )
+            self.kokoro = Kokoro.from_session(sess, "checkpoints/voices-v1.0.bin")
+
         self.present = self.sdk.chunk_size[1] * 640
         self.SPL = int(sum(self.sdk.chunk_size) * 16_000 / self.FPS) + 80
         self.sdk.start_processing_audio()
@@ -191,7 +225,9 @@ class AvatarSession:
     async def _greet_when_ready(self, text: str, voice: str):
         while self.video_frames == 0:
             await asyncio.sleep(0.05)
-        await self.speak(text, voice)
+        if not self.first_greet_done:
+            await self.speak(text)
+            self.first_greet_done = True
 
     def _start_video_thread(self):
         self.video_frame_queue = queue.Queue(maxsize=10)
@@ -249,7 +285,7 @@ class AvatarSession:
             except asyncio.CancelledError:
                 break
 
-    async def speak(self, text: str, voice: str = "af_heart"):
+    async def speak(self, text: str):
         if self.silence_task:
             self.silence_task.cancel()
             try:
@@ -260,7 +296,7 @@ class AvatarSession:
         rate = 16_000
         pos = 0
         buf = np.empty(0, np.float32)
-        async for chunk24, _ in self.kokoro.create_stream(text, voice=voice, speed=0.9, lang="en-us"):
+        async for chunk24, _ in self.kokoro.create_stream(text, voice=self.voice, speed=0.9, lang="en-us"):
             buf = np.concatenate([buf, self._resample(chunk24)])
             while len(buf) >= BUFFER:
                 frame, buf = buf[:BUFFER], buf[BUFFER:]
@@ -289,12 +325,10 @@ class AvatarSession:
         self.sdk.hubert_features_queue.queue.clear()
         
         self.sdk.motion_stitch_out_queue.queue.clear()
-        # self.sdk.warp_f3d_queue.queue.clear()
         self.sdk.decode_f3d_queue.queue.clear()
         
         if self.silence_task is None:
             self.silence_task = self.loop.create_task(self._silence_loop())
-
 
     async def stop(self):
         if self.video_thread_stop_event:
@@ -317,13 +351,8 @@ class AvatarSession:
             self.silence_task = None
         if self.lk_room:
             await self.lk_room.disconnect()
-        # if self.sdk:
-        #     try:
-        #         self.sdk.exit()
-        #     except Exception:
-        #         pass
-        # self.sdk.exit()
-            
+            self.lk_room = None
+
 async def _consume_stt_stream(session: AvatarSession, stream):
     try:
         async for ev in stream:
@@ -338,24 +367,19 @@ async def _consume_stt_stream(session: AvatarSession, stream):
                 hist = _chat_history.setdefault(session.room_name, [])
                 hist.append({"role": "user", "content": text})
 
-                # Fetch GPT reply first, before touching speak
                 reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
                 if not reply:
                     continue
 
                 async with session.speak_lock:
-                    # Only now start speak, no silence-padding drift
-                    await session.speak(reply, session.voice)
+                    await session.speak(reply)
                 hist.append({"role": "assistant", "content": reply})
     finally:
         await stream.aclose()
 
-    
 async def gpt4mini_reply(room: str, name: str, desc: str, max_tokens: int = 200) -> str | None:
     try:
         hist = _chat_history.get(room, [])
-
-        # Branching system instructions
         if "interview" in (desc or "").lower():
             role_instructions = (
                 f"Your name is {name}, you are simulating an {desc}. "
@@ -390,7 +414,6 @@ async def gpt4mini_reply(room: str, name: str, desc: str, max_tokens: int = 200)
     except Exception as e:
         print(f"GPT error: {e}")
         return None
-
 
 def viewer_token(room: str) -> str:
     return (
@@ -439,70 +462,75 @@ class ConfigReq(BaseModel):
     CHUNK_SIZE: Optional[List[int]] = None
     SAMPLING_TIMESTEP: Optional[int] = None
 
-
-# PUT GLOBAL AVATAR HERE
+class StatusResp(BaseModel):
+    loaded: bool
+    room: Optional[str] = None
 
 @app.post("/offer", response_model=OfferResp)
 async def offer_endpoint(req: OfferReq):
-    room = req.room.strip()
-    if not room:
+    global _GLOBAL_AVATAR
+    req_room = req.room.strip()
+    if not req_room:
         raise HTTPException(400, "room must not be empty")
-    if room in _sessions:
-        raise HTTPException(409, "room already exists")
 
-    ses = AvatarSession(
-        room,
-        req.input_image or "static/avatar.png",
-        req.voice or "af_heart",
-        req.name or "Assistant",
-        req.desc or "Realtime assistant"
-    )
-    await ses.offer()
-    _sessions[room] = ses
-
-    # _chat_history[room] = [
-    #     {
-    #         "role": "system",
-    #         "content": "You are an assistant designed for realtime STT. "
-    #                    "Lead the conversation politely. Start by introducing yourself "
-    #                    "and asking an opening question to engage the user."
-    #     }
-    # ]
-    # async def _intro_task():
-    #     reply = await gpt4mini_reply(room, max_tokens=40, name=ses.name, desc=ses.desc)
-    #     if reply:
-    #         await ses._greet_when_ready(reply, ses.voice)
-    #         _chat_history[room].append({"role": "assistant", "content": reply})
-
-    # asyncio.create_task(_intro_task())
-    asyncio.create_task(
-        ses._greet_when_ready(
-            f"...Hello, nice to meet you, my name is {req.name}, I am your {req.desc}, and how can I help you today?",
+    if _GLOBAL_AVATAR is None:
+        _GLOBAL_AVATAR = AvatarSession(
+            req_room,
+            req.input_image or "static/avatar.png",
             req.voice or "af_heart",
+            req.name or "Assistant",
+            req.desc or "Realtime assistant"
         )
-    )
-    return OfferResp(room=room, url=LIVEKIT_URL, token=viewer_token(room))
+        await _GLOBAL_AVATAR.offer()
+        asyncio.create_task(
+            _GLOBAL_AVATAR._greet_when_ready(
+                f"...Hello, nice to meet you, my name is {_GLOBAL_AVATAR.name}, I am your {_GLOBAL_AVATAR.desc}, and how can I help you today?",
+                _GLOBAL_AVATAR.voice,
+            )
+        )
+    else:
+        if _GLOBAL_AVATAR.lk_room is None:
+            _GLOBAL_AVATAR.room_name = req_room or _GLOBAL_AVATAR.room_name
+            await _GLOBAL_AVATAR.offer()
+            if not _GLOBAL_AVATAR.first_greet_done:
+                asyncio.create_task(
+                    _GLOBAL_AVATAR._greet_when_ready(
+                        f"...Hello, nice to meet you, my name is {_GLOBAL_AVATAR.name}, I am your {_GLOBAL_AVATAR.desc}, and how can I help you today?",
+                        _GLOBAL_AVATAR.voice,
+                    )
+                )
+        else:
+            await _GLOBAL_AVATAR._republish_ready_for_new_viewers()
+
+    active_room = _GLOBAL_AVATAR.room_name
+    return OfferResp(room=active_room, url=LIVEKIT_URL, token=viewer_token(active_room))
+
+@app.get("/status", response_model=StatusResp)
+async def status_endpoint():
+    ses = _GLOBAL_AVATAR
+    if not ses:
+        return StatusResp(loaded=False, room=None)
+    return StatusResp(loaded=bool(ses.first_greet_done), room=ses.room_name if ses else None)
 
 @app.post("/speak")
 async def speak_endpoint(req: SpeakReq):
-    ses = _sessions.get(req.room)
-    if not ses:
+    ses = _GLOBAL_AVATAR
+    if not ses or (ses.room_name != req.room and ses.lk_room is None):
         raise HTTPException(404, "room not found")
-    await ses.speak(req.text, req.voice or "af_heart")
+    await ses.speak(req.text)
     return {"status": "ok"}
 
 @app.post("/stop")
 async def stop_endpoint(req: StopReq):
-    ses = _sessions.pop(req.room, None)
-    _chat_history.pop(req.room, None)
-    if not ses:
+    ses = _GLOBAL_AVATAR
+    if not ses or (ses.room_name != req.room and ses.lk_room is None):
         raise HTTPException(404, "room not found")
     await ses.stop()
     return {"status": "stopped"}
 
 @app.post("/token", response_model=TokenResp)
 async def token_endpoint(req: TokenReq) -> TokenResp:
-    room = req.roomName or f"room-{uuid.uuid4().hex[:6]}"
+    room = req.roomName or (_GLOBAL_AVATAR.room_name if _GLOBAL_AVATAR else f"room-{uuid.uuid4().hex[:6]}")
     identity = req.participantId or f"user-{uuid.uuid4().hex[:6]}"
     grant = api.VideoGrants(room_join=True, room=room)
     token = (

@@ -29,6 +29,8 @@ soundfile==0.13.1
 livekit==1.0.12
 livekit-agents==1.2.1
 livekit-api==1.0.3
+livekit-plugins-deepgram
+openai
 
 # torch==2.7.1
 # torchvision

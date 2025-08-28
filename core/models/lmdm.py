@@ -139,4 +139,38 @@ class LMDM:
             pred_kp_seq = self._call_np(kp_cond, aud_cond, sampling_timesteps)
         return pred_kp_seq
 
-
+    def close(self):
+        try:
+            if self.model_type == "pytorch":
+                try:
+                    self.model.to("cpu")
+                except Exception:
+                    pass
+            elif self.model_type == "tensorrt":
+                # best-effort destroy for TRT wrappers
+                for k in ("destroy", "close", "cleanup"):
+                    fn = getattr(self.model, k, None)
+                    if callable(fn):
+                        try: fn()
+                        except Exception: pass
+                # also try common handles on custom wrappers
+                for h in ("context", "engine", "runtime"):
+                    obj = getattr(self.model, h, None)
+                    if hasattr(obj, "destroy"):
+                        try: obj.destroy()
+                        except Exception: pass
+            elif self.model_type == "onnx":
+                for k in ("close", "release", "cleanup"):
+                    fn = getattr(self.model, k, None)
+                    if callable(fn):
+                        try: fn()
+                        except Exception: pass
+        finally:
+            self.model = None
+            import gc
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache(); torch.cuda.ipc_collect()
+            except Exception:
+                pass
