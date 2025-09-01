@@ -175,7 +175,7 @@ class StreamSDK:
         )
 
         # ======== Setup Motion Stitch ========
-        is_image_flag = source_info["is_image_flag"]
+        is_image_flag = True
         x_s_info = source_info['x_s_info_lst'][0]
         self.motion_stitch.setup(
             N_d=self.N_d,

@@ -47,7 +47,7 @@ FPS_1 = 25
 FPS_2 = 25
 CHUNK_SIZE = (2, 4, 2)
 SAMPLING_TIMESTEP = 12
-RESOLUTION = 1080
+RESOLUTION = 800
 BUFFER = 320
 SILENCE_BUFFER = 320
 
@@ -87,10 +87,10 @@ class AvatarSession:
         self._video_ready_sent = False
         self.resampler = torchaudio.transforms.Resample(24000, 16000).cuda()
         self.first_greet_done = False
-
-        # --- NEW: queue-based TTS worker (prevents HTTP hang, keeps playback smooth)
         self.tts_queue: asyncio.Queue[Tuple[str, str]] = asyncio.Queue()
         self.tts_worker_task: Optional[asyncio.Task] = None
+        self._connected: bool = False
+        self._closing: bool = False
 
     def _reset_session_state(self):
         self.av_sync = None
@@ -108,6 +108,44 @@ class AvatarSession:
 
     def _resample(self, w: np.ndarray) -> np.ndarray:
         return self.resampler(torch.from_numpy(w).cuda().unsqueeze(0)).squeeze(0).cpu().numpy()
+
+    def is_connected(self) -> bool:
+        return bool(self.lk_room) and self._connected
+
+    async def _cleanup_on_disconnect(self):
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            if self.video_thread_stop_event:
+                self.video_thread_stop_event.set()
+            if self.video_thread and self.video_thread.is_alive():
+                self.video_thread.join(timeout=1.5)
+            self.video_thread = None
+            self.video_thread_stop_event = None
+            self.video_frame_queue = None
+            for t in (self.video_task, self.silence_task):
+                if t:
+                    t.cancel()
+            for t in (self.video_task, self.silence_task):
+                if t:
+                    try:
+                        await t
+                    except asyncio.CancelledError:
+                        pass
+            self.video_task = None
+            self.silence_task = None
+            self.av_sync = None
+            self.samples_pushed = 0
+            self.video_frames = 0
+            self._audio_ready_sent = False
+            self.first_greet_done = False
+            self.buffered_audio.clear()
+            self.ready_event = asyncio.Event()
+            self._connected = False
+            self.lk_room = None
+        finally:
+            self._closing = False
         
     async def _signal_audio_ready(self):
         if self._audio_ready_sent or not self.lk_room:
@@ -163,7 +201,15 @@ class AvatarSession:
             .to_jwt()
         )
         self.lk_room = rtc.Room()
+
+        @self.lk_room.on("disconnected")
+        def _on_disconnected():
+            log.info("LiveKit room disconnected")
+            self._connected = False
+            asyncio.create_task(self._cleanup_on_disconnect())
+
         await self.lk_room.connect(LIVEKIT_URL, token)
+        self._connected = True
         if self.http_session is None:
             timeout = aiohttp.ClientTimeout(
                 total=None,
@@ -228,7 +274,6 @@ class AvatarSession:
         self.silence_task = self.loop.create_task(self._silence_loop())
         self.ready_event.set()
 
-        # --- NEW: start TTS worker when ready
         if not self.tts_worker_task or self.tts_worker_task.done():
             self.tts_worker_task = self.loop.create_task(self._tts_worker())
         
@@ -295,7 +340,6 @@ class AvatarSession:
             except asyncio.CancelledError:
                 break
 
-    # Keep same logic, but allow overriding voice like the old non-global version
     async def speak(self, text: str, voice: Optional[str] = None):
         if self.silence_task:
             self.silence_task.cancel()
@@ -331,7 +375,6 @@ class AvatarSession:
                 pos += BUFFER
             await asyncio.sleep(0)
         
-        # clear internal pipelines (unchanged)
         self.sdk.audio2motion_queue.queue.clear()
         self.sdk.motion_stitch_queue.queue.clear()
         self.sdk.putback_queue.queue.clear()
@@ -342,14 +385,18 @@ class AvatarSession:
         if self.silence_task is None:
             self.silence_task = self.loop.create_task(self._silence_loop())
 
-    # ---------- NEW: Queue + worker ----------
     def queue_speak(self, text: str, voice: Optional[str] = None):
-        """Enqueue speech to avoid blocking HTTP handlers; preserves old FE contract."""
         v = (voice or self.voice)
+        try:
+            if self.tts_queue.qsize() > 4:
+                while not self.tts_queue.empty():
+                    self.tts_queue.get_nowait()
+                    self.tts_queue.task_done()
+        except Exception:
+            pass
         self.tts_queue.put_nowait((text, v))
 
     async def _tts_worker(self):
-        """Serialize speech; prevents overlap and long-request hangs."""
         while True:
             text, v = await self.tts_queue.get()
             try:
@@ -361,43 +408,7 @@ class AvatarSession:
                 self.tts_queue.task_done()
 
     async def stop(self):
-        # stop TTS worker
-        if self.tts_worker_task and not self.tts_worker_task.done():
-            self.tts_worker_task.cancel()
-            try:
-                await self.tts_worker_task
-            except asyncio.CancelledError:
-                pass
-            self.tts_worker_task = None
-        # drain queue
-        while not self.tts_queue.empty():
-            try:
-                self.tts_queue.get_nowait()
-                self.tts_queue.task_done()
-            except queue.Empty:
-                break
-
-        if self.video_thread_stop_event:
-            self.video_thread_stop_event.set()
-        if self.video_thread and self.video_thread.is_alive():
-            self.video_thread.join(timeout=2.0)
-        if self.video_task:
-            self.video_task.cancel()
-            try:
-                await self.video_task
-            except asyncio.CancelledError:
-                pass
-            self.video_task = None
-        if self.silence_task:
-            self.silence_task.cancel()
-            try:
-                await self.silence_task
-            except asyncio.CancelledError:
-                pass
-            self.silence_task = None
-        if self.lk_room:
-            await self.lk_room.disconnect()
-            self.lk_room = None
+        return
 
 
 async def _consume_stt_stream(session: AvatarSession, stream):
@@ -414,7 +425,6 @@ async def _consume_stt_stream(session: AvatarSession, stream):
                 reply = await gpt4mini_reply(session.room_name, session.name, session.desc)
                 if not reply:
                     continue
-                # enqueue, don't block
                 session.queue_speak(reply, session.voice)
                 hist.append({"role": "assistant", "content": reply})
     finally:
@@ -529,8 +539,8 @@ async def offer_endpoint(req: OfferReq):
             )
         )
     else:
-        if _GLOBAL_AVATAR.lk_room is None:
-            _GLOBAL_AVATAR.room_name = req_room or _GLOBAL_AVATAR.room_name
+        _GLOBAL_AVATAR.room_name = req_room or _GLOBAL_AVATAR.room_name
+        if _GLOBAL_AVATAR.lk_room is None or not _GLOBAL_AVATAR.is_connected():
             await _GLOBAL_AVATAR.offer()
             if not _GLOBAL_AVATAR.first_greet_done:
                 asyncio.create_task(
@@ -542,7 +552,6 @@ async def offer_endpoint(req: OfferReq):
         else:
             await _GLOBAL_AVATAR._republish_ready_for_new_viewers()
 
-    # keep per-room history key consistent with current active room
     if req_room not in _chat_history:
         _chat_history[req_room] = []
 
@@ -561,7 +570,6 @@ async def speak_endpoint(req: SpeakReq):
     ses = _GLOBAL_AVATAR
     if not ses or (ses.room_name != req.room and ses.lk_room is None):
         raise HTTPException(404, "room not found")
-    # enqueue and return immediately (no FE change required)
     ses.queue_speak(req.text, (req.voice or ses.voice))
     return {"status": "ok"}
 
