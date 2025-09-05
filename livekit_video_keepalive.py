@@ -230,7 +230,7 @@ class AvatarSession:
             if isinstance(track, rtc.RemoteAudioTrack) and Enable_STT:
                 asyncio.create_task(self._run_stt_for_track(track))
 
-        vs = rtc.VideoSource(1080, 900)
+        vs = rtc.VideoSource(1080, 900) 
         asrc = rtc.AudioSource(16_000, 1, 1000)
         vtr = rtc.LocalVideoTrack.create_video_track("v", vs)
         atr = rtc.LocalAudioTrack.create_audio_track("a", asrc)
