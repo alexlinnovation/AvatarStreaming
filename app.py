@@ -1,35 +1,20 @@
-from fractions import Fraction
-import queue
 import subprocess
-import threading
-import time
-import json, uuid, asyncio
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket
+import uuid
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from typing import Optional, Union
 import os, librosa, numpy as np, torch, pickle, random, math, json
-import cv2
-from stream_pipeline_offline import StreamSDK as StreamSDKOffline
-from stream_pipeline_online import StreamSDK
+from stream_pipeline_offline import StreamSDK
 from src.utils import save_temp_file, convert_to_chinese_readable
-from fastapi.staticfiles import StaticFiles
 from kokoro import KPipeline
 import soundfile as sf
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaRelay, MediaPlayer
-from starlette.websockets import WebSocketDisconnect
-from aiortc.mediastreams import VideoFrame, MediaStreamError, MediaStreamTrack, VideoStreamTrack
-from inference import run
+
 
 app = FastAPI()
-peers = {} 
 
 DATA_ROOT = "./checkpoints/ditto_trt_Ampere_Plus"
 CFG_PKL = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt.pkl"
-sdk = StreamSDKOffline(CFG_PKL, DATA_ROOT)
-
-sdk_online = StreamSDK(CFG_PKL, DATA_ROOT, chunk_size=(3, 5, 2))
-sdk_online.online_mode = True
+sdk = StreamSDK(CFG_PKL, DATA_ROOT)
 
 def run_pipeline(SDK, audio_path, source_path, output_path, more_kwargs):
     setup_kwargs = more_kwargs.get("setup_kwargs", {})
@@ -160,41 +145,3 @@ async def generate_video_from_text(
         media_type="video/mp4",
         filename=os.path.basename(final_video)
     )
-    
-''' WebSocket handling for real-time video generation can be added here if needed.'''
-### API Goes here ###
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
-relay = MediaRelay()
-
-# @app.post("/offer")
-# async def webrtc_offer(offer: dict):
-#     pc = RTCPeerConnection()
-#     peer_id = str(uuid.uuid4())
-
-#     player = MediaPlayer("static/idle.mp4", format="mp4", loop=True)
-#     video_sender = pc.addTrack(player.video)        # keep sender handle
-#     if player.audio:
-#         pc.addTrack(player.audio)
-
-#     await pc.setRemoteDescription(
-#         RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
-#     )
-#     answer = await pc.createAnswer()
-#     await pc.setLocalDescription(answer)
-
-#     # ── store everything the /speak handler needs ─────────────
-#     peers[peer_id] = {
-#         "pc": pc,
-#         "idle_player": player,
-#         "video_sender": video_sender,
-#         "src_img": "static/avatar.png"   # change if you use per-session image
-#     }
-
-#     return {
-#         "sdp": pc.localDescription.sdp,
-#         "type": pc.localDescription.type,
-#         "peer_id": peer_id,
-#     }
-
-

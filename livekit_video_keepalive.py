@@ -3,6 +3,7 @@
 # ------------------------------------------------------------------------------
 import json
 from src.gated_avsync import GatedAVSynchronizer
+from src.gated_avsyncv2 import GatedAVSynchronizerV2
 import collections
 import asyncio, logging, uuid, time, io, queue, threading
 import numpy as np, torch, torchaudio, av
@@ -47,7 +48,7 @@ FPS_1 = 25
 FPS_2 = 25
 CHUNK_SIZE = (2, 4, 2)
 SAMPLING_TIMESTEP = 12
-RESOLUTION = 800
+RESOLUTION = 1080
 BUFFER = 320
 SILENCE_BUFFER = 320
 
@@ -65,7 +66,7 @@ class AvatarSession:
         self.sdk: Optional[StreamSDK] = None
         self.kokoro: Optional[Kokoro] = None
         self.lk_room: Optional[rtc.Room] = None
-        self.av_sync: Optional[GatedAVSynchronizer] = None
+        self.av_sync: Optional[GatedAVSynchronizerV2] = None
         self.video_task: Optional[asyncio.Task] = None
         self.silence_task: Optional[asyncio.Task] = None
         self.video_thread: Optional[threading.Thread] = None
@@ -229,14 +230,14 @@ class AvatarSession:
             if isinstance(track, rtc.RemoteAudioTrack) and Enable_STT:
                 asyncio.create_task(self._run_stt_for_track(track))
 
-        vs = rtc.VideoSource(1080, 800)
+        vs = rtc.VideoSource(1080, 900)
         asrc = rtc.AudioSource(16_000, 1, 1000)
         vtr = rtc.LocalVideoTrack.create_video_track("v", vs)
         atr = rtc.LocalAudioTrack.create_audio_track("a", asrc)
         await self.lk_room.local_participant.publish_track(vtr)
         await self.lk_room.local_participant.publish_track(atr)
 
-        self.av_sync = GatedAVSynchronizer(
+        self.av_sync = GatedAVSynchronizerV2(
             audio_source=asrc,
             video_source=vs,
             video_fps=FPS_1,

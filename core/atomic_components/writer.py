@@ -5,9 +5,9 @@ import os
 class VideoWriterByImageIO:
     def __init__(self, video_path, fps=25, **kwargs):
         video_format = kwargs.get("format", "mp4")  # default is mp4 format
-        codec = "libx265"  # default is libx264 encoding
+        codec = "libx264"  # default is libx264 encoding
         quality = kwargs.get("quality")  # video quality
-        pixelformat = "yuv444p" #kwargs.get("pixelformat", "yuv420p")  # video pixel format
+        pixelformat = "yuv420p" #kwargs.get("pixelformat", "yuv420p")  # video pixel format
         macro_block_size = kwargs.get("macro_block_size", 2)
         ffmpeg_params = ["-crf", str(kwargs.get("crf", 18))]
 

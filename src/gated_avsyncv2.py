@@ -6,9 +6,10 @@ from typing import Optional, Union
 from livekit.rtc import AudioSource, VideoSource
 from livekit.rtc import VideoFrame as LKVideoFrame
 from livekit.rtc import AudioFrame as LKAudioFrame
+import numpy as np  # <-- added
 
 
-class GatedAVSynchronizer:
+class GatedAVSynchronizerV2:
     """
     Video is the master clock.
     - Audio never leads video (allowed_audio_lead_ms controls any small allowance).
@@ -65,6 +66,11 @@ class GatedAVSynchronizer:
         self._audio_wall_next = None
         self._audio_dt_default = 0.02
 
+        # ---- NEW: zero-latency de-click state ----
+        self._prev_tail: Optional[np.ndarray] = None  # last sample per channel
+        self._xfade_ms: float = 1.5                  # boundary crossfade length
+        self._softclip_strength: float = 1.2         # 1.0=no clip, 1.2–1.6 gentle
+
 
     async def push(
         self,
@@ -93,6 +99,7 @@ class GatedAVSynchronizer:
     def reset(self) -> None:
         self._next_frame_time = None
         self._send_timestamps.clear()
+        self._prev_tail = None  # reset de-click state
 
     async def _drain_video(self) -> None:
         while not self._stopped:
@@ -135,6 +142,13 @@ class GatedAVSynchronizer:
 
             self._last_audio_time_reported = ts_eff
 
+            # ---- NEW: zero-latency de-click / soft-clip (no timing changes) ----
+            try:
+                self._declick_inplace(af)
+            except Exception:
+                # Fail-safe: never block playout if processing fails
+                pass
+
             # Release to LiveKit
             await self._audio_source.capture_frame(af)
             self._audio_queue.task_done()
@@ -175,3 +189,89 @@ class GatedAVSynchronizer:
     @property
     def last_audio_time(self) -> float:
         return self._last_audio_time_reported
+
+    # ---- NEW: helpers for in-place transient suppression ----
+    def _declick_inplace(self, af: LKAudioFrame) -> None:
+        """
+        Causal, zero-latency smoothing:
+          - short crossfade from previous tail sample(s)
+          - gentle soft-clip for rare spikes
+        Works per frame; no extra buffering or delay.
+        """
+        # Try to access PCM as int16
+        sr = int(getattr(af, "sample_rate", 16000))
+        ch = int(getattr(af, "num_channels", 1))
+
+        buf = getattr(af, "data", None)
+        if buf is None:
+            # try alternate attribute names if SDK differs
+            for alt in ("buffer", "buf", "pcm", "samples_bytes"):
+                buf = getattr(af, alt, None)
+                if buf is not None:
+                    break
+        if buf is None:
+            return  # nothing we can do safely
+
+        # Make a writable copy for processing
+        arr = np.frombuffer(buf, dtype=np.int16).copy()
+        if arr.size == 0:
+            return
+
+        # Shape [num_frames, ch]
+        if ch > 1:
+            if arr.size % ch != 0:
+                # fallback: treat as mono
+                ch = 1
+            frames = arr.size // ch
+            x = arr.reshape(frames, ch).astype(np.float32)
+        else:
+            x = arr.astype(np.float32).reshape(-1, 1)
+            frames = x.shape[0]
+
+        # 1) Boundary crossfade to remove clicks between frames
+        xfade_len = max(1, min(int(sr * self._xfade_ms / 1000.0), frames))
+        if self._prev_tail is None or self._prev_tail.shape[0] != x.shape[1]:
+            # initialize prev tail as first sample to avoid ramp from zero
+            self._prev_tail = x[0, :].copy()
+
+        if xfade_len > 1:
+            alphas = np.linspace(0.0, 1.0, xfade_len, dtype=np.float32).reshape(-1, 1)
+            head = x[:xfade_len, :]
+            x[:xfade_len, :] = (1.0 - alphas) * self._prev_tail[None, :] + alphas * head
+
+        # 2) Gentle soft-clip to shave transients (very mild)
+        # scale to [-1,1], soft-clip, back to int16 range
+        y = x / 32768.0
+        s = float(self._softclip_strength)
+        y = np.tanh(s * y) / np.tanh(s)
+
+        # update tail state for next frame
+        self._prev_tail = y[-1, :].copy()
+
+        # write back
+        y = (y * 32767.0).astype(np.int16)
+        if ch > 1:
+            y = y.reshape(-1)
+        out_bytes = y.tobytes()
+
+        # Try to replace in-place; if not possible, set attribute
+        try:
+            # attempt mutable view
+            mv = memoryview(buf)
+            if not mv.readonly and len(mv) == len(out_bytes):
+                mv[:] = out_bytes  # type: ignore[index]
+                return
+        except Exception:
+            pass
+
+        # Replace data attribute (common for dataclass-style frames)
+        try:
+            setattr(af, "data", out_bytes)
+        except Exception:
+            # last resort: try common alt names
+            for alt in ("buffer", "buf", "pcm", "samples_bytes"):
+                try:
+                    setattr(af, alt, out_bytes)
+                    break
+                except Exception:
+                    continue
