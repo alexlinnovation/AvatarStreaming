@@ -32,6 +32,7 @@ livekit-api==1.0.3
 livekit-plugins-deepgram
 openai
 cn2an
+edge-tts
 
 # torch==2.7.1
 # torchvision

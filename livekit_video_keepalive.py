@@ -230,7 +230,7 @@ class AvatarSession:
             if isinstance(track, rtc.RemoteAudioTrack) and Enable_STT:
                 asyncio.create_task(self._run_stt_for_track(track))
 
-        vs = rtc.VideoSource(1080, 900) 
+        vs = rtc.VideoSource(1080, 900)
         asrc = rtc.AudioSource(16_000, 1, 1000)
         vtr = rtc.LocalVideoTrack.create_video_track("v", vs)
         atr = rtc.LocalAudioTrack.create_audio_track("a", asrc)
@@ -246,7 +246,7 @@ class AvatarSession:
         if self.sdk is None:
             self.sdk = StreamSDK(
                 "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl",
-                "./checkpoints/ditto_trt_custom",
+                "./checkpoints/ditto_trt_Ampere_Plus",
                 chunk_size=CHUNK_SIZE,
             )
             self.sdk.online_mode = True
@@ -254,7 +254,7 @@ class AvatarSession:
                 self.avatar_png,
                 max_size=RESOLUTION,
                 sampling_timesteps=SAMPLING_TIMESTEP,
-                emo=4,
+                emo=4, # 'Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise', 'Contempt'
                 drive_eye=True,
             )
         else:
