@@ -37,7 +37,7 @@ class ConditionHandler:
         use_eye_ball=True,
         seq_frames=80,
     ):
-        self.use_emo = True
+        self.use_emo = use_emo
         self.use_sc = use_sc
         self.use_eye_open = use_eye_open
         self.use_eye_ball = use_eye_ball
