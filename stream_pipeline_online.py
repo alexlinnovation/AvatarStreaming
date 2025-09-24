@@ -339,13 +339,13 @@ class StreamSDK:
         # ======== Audio Feat Buffer ========
         self.reset_audio_features()
         # ======== Setup Worker Threads ========
-        QUEUE_MAX_SIZE = 200
+        QUEUE_MAX_SIZE = 300
         # self.QUEUE_TIMEOUT = None
 
         self.audio2motion_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
         self.motion_stitch_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
         self.motion_stitch_out_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
-        self.warp_f3d_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
+        self.warp_f3d_queue = queue.Queue(maxsize=0)
         self.decode_f3d_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
         self.putback_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
         self.frame_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
@@ -998,4 +998,3 @@ class StreamSDK:
                 torch.cuda.empty_cache()
             with suppress(Exception):
                 torch.cuda.ipc_collect()
-

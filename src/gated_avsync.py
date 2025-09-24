@@ -24,7 +24,7 @@ class GatedAVSynchronizer:
         video_source: VideoSource,
         video_fps: float,
         video_queue_size_ms: float = 100,
-        allowed_audio_lead_ms: float = 0.0,
+        allowed_audio_lead_ms: float = 20.0,
         _max_delay_tolerance_ms: float = 100,
     ):
         self._audio_source = audio_source
@@ -53,7 +53,7 @@ class GatedAVSynchronizer:
         # Backlog / catch-up policy (structural, not tuning)
         self._drop_margin = max(0.10, 2 * self._frame_interval)       # >=100ms or ~2 frames
         self._fast_forward_threshold = max(10, int(self._video_fps))   # ~1s audio backlog
-        self._drop_batch_yield = 256                                   # yield after N drops
+        self._drop_batch_yield = 128                                   # yield after N drops
 
         # Video pacing
         self._next_frame_time: Optional[float] = None

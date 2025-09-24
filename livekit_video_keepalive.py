@@ -36,9 +36,9 @@ app.add_middleware(
     allow_credentials=True,
 )
 
-LIVEKIT_URL = "wss://wdqwd-i503xu0n.livekit.cloud"
-API_KEY = "APIewTmSoRk6rFS"
-API_SECRET = "XCWjdkZbDW2oj56f0eJjStwLEga2FRfMJzvfJ09WN7aB"
+LIVEKIT_URL = "wss://ditto-qkkkjufc.livekit.cloud"
+API_KEY = "APIpbvPBvHcC2DY"
+API_SECRET = "T9Zfkjn51I9IrspaOzWEUBExnMGFI0WfDgPNgQs3fYVB"
 DEEPGRAM_API_KEY="f37043ae1b11b119212b8e75f7cc59b8ca722ac2"
 OPEN_AI_KEY = "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"
 FORWARD_INTERIM = True
@@ -66,7 +66,7 @@ class AvatarSession:
         self.sdk: Optional[StreamSDK] = None
         self.kokoro: Optional[Kokoro] = None
         self.lk_room: Optional[rtc.Room] = None
-        self.av_sync: Optional[GatedAVSynchronizerV2] = None
+        self.av_sync: None
         self.video_task: Optional[asyncio.Task] = None
         self.silence_task: Optional[asyncio.Task] = None
         self.video_thread: Optional[threading.Thread] = None
