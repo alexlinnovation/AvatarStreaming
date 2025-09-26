@@ -34,3 +34,6 @@ log/*
 
 !example/audio.wav
 !example/image.png
+
+frontend/node_modules
+frontend/.env

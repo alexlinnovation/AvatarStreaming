@@ -22,6 +22,8 @@ from livekit.agents.stt import SpeechEventType
 from livekit.plugins import deepgram
 import aiohttp
 from openai import AsyncOpenAI
+import os, base64, re
+from fastapi import UploadFile, File
 
 log = logging.getLogger("speak_debug")
 log.setLevel(logging.INFO)
@@ -36,9 +38,9 @@ app.add_middleware(
     allow_credentials=True,
 )
 
-LIVEKIT_URL = "wss://ditto-qkkkjufc.livekit.cloud"
-API_KEY = "APIpbvPBvHcC2DY"
-API_SECRET = "T9Zfkjn51I9IrspaOzWEUBExnMGFI0WfDgPNgQs3fYVB"
+LIVEKIT_URL = "wss://ditto-fkhhw4l8.livekit.cloud"
+API_KEY = "API5kyQSefDgjfy"
+API_SECRET = "Rr3fLChTCawlMnDeDwPWkKm2thLuum6JDqe3zjxNBg0B"
 DEEPGRAM_API_KEY="f37043ae1b11b119212b8e75f7cc59b8ca722ac2"
 OPEN_AI_KEY = "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"
 FORWARD_INTERIM = True
@@ -47,8 +49,10 @@ Enable_STT = False
 FPS_1 = 25
 FPS_2 = 25
 CHUNK_SIZE = (2, 4, 2)
-SAMPLING_TIMESTEP = 12
-RESOLUTION = 1080
+SAMPLING_TIMESTEP_IMAGE = 12
+SAMPLING_TIMESTEP_VIDEO = 9
+RESOLUTION_IMAGE = 1080
+RESOLUTION_VIDEO = 900
 BUFFER = 320
 SILENCE_BUFFER = 320
 
@@ -236,12 +240,13 @@ class AvatarSession:
         atr = rtc.LocalAudioTrack.create_audio_track("a", asrc)
         await self.lk_room.local_participant.publish_track(vtr)
         await self.lk_room.local_participant.publish_track(atr)
-
-        self.av_sync = GatedAVSynchronizerV2(
-            audio_source=asrc,
-            video_source=vs,
-            video_fps=FPS_1,
-        )
+        
+        if self.av_sync is None:
+            self.av_sync = GatedAVSynchronizerV2(
+                audio_source=asrc,
+                video_source=vs,
+                video_fps=FPS_1,
+            )
 
         if self.sdk is None:
             self.sdk = StreamSDK(
@@ -250,12 +255,20 @@ class AvatarSession:
                 chunk_size=CHUNK_SIZE,
             )
             self.sdk.online_mode = True
+            if self.avatar_png.lower().endswith(".png") or self.avatar_png.lower().endswith(".jpg"):
+                SAMPLING_TIMESTEP = SAMPLING_TIMESTEP_IMAGE
+                RESOLUTION = RESOLUTION_IMAGE
+            else:
+                SAMPLING_TIMESTEP = SAMPLING_TIMESTEP_VIDEO
+                RESOLUTION = RESOLUTION_VIDEO
             self.sdk.setup(
                 self.avatar_png,
                 max_size=RESOLUTION,
                 sampling_timesteps=SAMPLING_TIMESTEP,
                 emo=4,
                 drive_eye=True,
+                smo_k_d=3,
+                smo_k_s=8
             )
         else:
             self.sdk.reset()
@@ -353,7 +366,7 @@ class AvatarSession:
         pos = 0
         buf = np.empty(0, np.float32)
         v = (voice or self.voice)
-        async for chunk24, _ in self.kokoro.create_stream(text, voice=v, speed=0.9, lang="en-us"):
+        async for chunk24, _ in self.kokoro.create_stream(text, voice=v, speed=1.0, lang="en-us"):
             buf = np.concatenate([buf, self._resample(chunk24)])
             while len(buf) >= BUFFER:
                 frame, buf = buf[:BUFFER], buf[BUFFER:]
@@ -599,22 +612,12 @@ async def token_endpoint(req: TokenReq) -> TokenResp:
         )
     return TokenResp(accessToken=token.to_jwt())
 
-@app.post("/config")
-async def config_endpoint(req: ConfigReq):
-    global FPS_1, FPS_2, CHUNK_SIZE, SAMPLING_TIMESTEP
-    if req.FPS_1 is not None:
-        FPS_1 = req.FPS_1
-    if req.FPS_2 is not None:
-        FPS_2 = req.FPS_2
-    if req.CHUNK_SIZE is not None:
-        if len(req.CHUNK_SIZE) != 3:
-            raise HTTPException(400, "CHUNK_SIZE must have exactly 3 values")
-        CHUNK_SIZE = tuple(req.CHUNK_SIZE)
-    if req.SAMPLING_TIMESTEP is not None:
-        SAMPLING_TIMESTEP = req.SAMPLING_TIMESTEP
-    return {"status": "ok"}
 
-app.mount("/", StaticFiles(directory="out", html=True), name="frontend")
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+app.mount("/", StaticFiles(directory="frontend/out", html=True), name="frontend")
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 @app.get("/")
 async def root():

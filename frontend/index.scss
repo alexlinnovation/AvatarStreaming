@@ -1,0 +1,14 @@
+@import "./styles/fonts";
+@import "./styles/variables";
+
+// -------------------------- //
+// -- Main project styles -- //
+// -------------------------- //
+
+body {
+  margin: 0;
+  font-family: $font-poppins-regular, "Segoe UI", "Roboto", "Oxygen", "Ubuntu",
+    "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

@@ -773,19 +773,19 @@ class StreamSDK:
         self.audio2motion_queue.queue.clear()
         self.motion_stitch_queue.queue.clear()
         self.putback_queue.queue.clear()
-        self.warp_f3d_queue.queue.clear()
+        # self.warp_f3d_queue.queue.clear()
         self.decode_f3d_queue.queue.clear()
-        self.frame_queue.queue.clear()
+        # self.frame_queue.queue.clear()
         self.hubert_features_queue.queue.clear()
         self.motion_stitch_out_queue.queue.clear()
 
-        # CRITICAL FIX: Reset counters BEFORE setting reset flag
-        self.expected_frames.set(0)
-        self.pending_frames.set(0)
-        self.starting_gen_frame_idx = 0  # NEW: Reset this too
+        # # CRITICAL FIX: Reset counters BEFORE setting reset flag
+        # self.expected_frames.set(0)
+        # self.pending_frames.set(0)
+        # self.starting_gen_frame_idx = 0  # NEW: Reset this too
         
-        # Now reset audio features
-        self.reset_audio_features()
+        # # Now reset audio features
+        # self.reset_audio_features()
 
     def reset_audio_features(self):
         self.reset_audio2motion_needed.set()

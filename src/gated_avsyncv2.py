@@ -1,4 +1,4 @@
-# gated_avsync.py
+# gated_avsyncv2.py  (drop-in replacement with minimal changes)
 import asyncio
 import time
 from collections import deque
@@ -6,16 +6,16 @@ from typing import Optional, Union
 from livekit.rtc import AudioSource, VideoSource
 from livekit.rtc import VideoFrame as LKVideoFrame
 from livekit.rtc import AudioFrame as LKAudioFrame
-import numpy as np  # <-- added
+import numpy as np
 
 
 class GatedAVSynchronizerV2:
     """
     Video is the master clock.
     - Audio never leads video (allowed_audio_lead_ms controls any small allowance).
-    - When backlog accumulates (typically silence), quickly skip audio frames whose
-      timestamps are already behind the video clock to prevent stalls before speech.
-      While skipping, periodically yield to avoid starving the video task.
+    - Backlog control: skip stale audio when far behind to avoid stalls before speech.
+    - Event-driven gating (no 1ms polling), plus start barrier so audio can't run before video.
+    - Small, bounded catch-up burst when video sprints ahead.
     """
 
     def __init__(
@@ -44,12 +44,8 @@ class GatedAVSynchronizerV2:
 
         # Queues
         self._video_queue_max = max(1, int(self._video_fps * self._video_queue_size_secs))
-        self._video_queue: asyncio.Queue[tuple[LKVideoFrame, Optional[float]]] = asyncio.Queue(
-            maxsize=60
-        )
-        self._audio_queue: asyncio.Queue[tuple[LKAudioFrame, Optional[float]]] = asyncio.Queue(
-            maxsize=60
-        )
+        self._video_queue: asyncio.Queue[tuple[LKVideoFrame, Optional[float]]] = asyncio.Queue(maxsize=60)
+        self._audio_queue: asyncio.Queue[tuple[LKAudioFrame, Optional[float]]] = asyncio.Queue(maxsize=60)
 
         # Backlog / catch-up policy (structural, not tuning)
         self._drop_margin = max(0.10, 2 * self._frame_interval)       # >=100ms or ~2 frames
@@ -60,17 +56,25 @@ class GatedAVSynchronizerV2:
         self._next_frame_time: Optional[float] = None
         self._send_timestamps: deque[float] = deque(maxlen=max(2, int(1.0 * self._video_fps)))
 
+        # ★ NEW: video tick & start barrier (event-driven gating)
+        self._video_tick = asyncio.Event()
+        self._video_started = asyncio.Event()
+
+        # ★ NEW: small catch-up burst knobs (keep tiny to avoid rush)
+        self._catchup_high = 0.080   # start bursting if video leads audio ts by >80 ms
+        self._catchup_target = 0.020 # stop bursting once inside 20 ms
+        self._catchup_max = 2        # at most 2 extra frames in one go
+
         # Tasks
         self._t_video = asyncio.create_task(self._drain_video())
         self._t_audio = asyncio.create_task(self._drain_audio())
         self._audio_wall_next = None
         self._audio_dt_default = 0.02
 
-        # ---- NEW: zero-latency de-click state ----
-        self._prev_tail: Optional[np.ndarray] = None  # last sample per channel
-        self._xfade_ms: float = 1.5                  # boundary crossfade length
-        self._softclip_strength: float = 1.2         # 1.0=no clip, 1.2–1.6 gentle
-
+        # De-click state
+        self._prev_tail: Optional[np.ndarray] = None
+        self._xfade_ms: float = 1.5
+        self._softclip_strength: float = 1.2
 
     async def push(
         self,
@@ -99,7 +103,10 @@ class GatedAVSynchronizerV2:
     def reset(self) -> None:
         self._next_frame_time = None
         self._send_timestamps.clear()
-        self._prev_tail = None  # reset de-click state
+        self._prev_tail = None
+        # ★ NEW: reset events
+        self._video_tick.clear()
+        # _video_started auto-resets naturally on new run when first frame comes
 
     async def _drain_video(self) -> None:
         while not self._stopped:
@@ -108,6 +115,11 @@ class GatedAVSynchronizerV2:
             self._video_source.capture_frame(vf)
             if ts is not None:
                 self._last_video_time = float(ts)
+            # ★ NEW: signal "a video frame advanced"
+            if not self._video_started.is_set():
+                self._video_started.set()
+            self._video_tick.set()
+            self._video_tick.clear()
             self._after_frame()
             self._video_queue.task_done()
 
@@ -117,14 +129,20 @@ class GatedAVSynchronizerV2:
         while not self._stopped:
             af, ts = await self._audio_queue.get()
 
-            # Effective timestamp: when None, align to current video edge (no lead)
+            # Effective timestamp: if None, align to current video edge (no lead)
             ts_eff = (self._last_video_time + self._allowed_lead) if ts is None else float(ts)
 
-            # Fast-forward stale backlog without starving the loop
+            # ★ NEW: start barrier — don't let audio out before first video frame
+            if not self._video_started.is_set():
+                try:
+                    await asyncio.wait_for(self._video_started.wait(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    pass
+
+            # Fast-forward stale backlog without starving the loop (unchanged)
             if self._audio_queue.qsize() > self._fast_forward_threshold:
                 dropped = 0
                 while (self._audio_queue.qsize() > 0) and ((self._last_video_time - ts_eff) > self._drop_margin):
-                    # drop this stale frame
                     self._audio_queue.task_done()
                     dropped += 1
                     try:
@@ -132,25 +150,61 @@ class GatedAVSynchronizerV2:
                         ts_eff = (self._last_video_time + self._allowed_lead) if ts is None else float(ts)
                     except QueueEmpty:
                         break
-                    # yield periodically so video task can run
                     if (dropped % self._drop_batch_yield) == 0:
                         await asyncio.sleep(0)
 
-            # Normal gating: audio never leads video
+            # ★ NEW: event-driven gate instead of 1ms polling
+            # If audio ts would lead video+lead, wait to be poked by next video tick
+            # Use short timeouts to stay responsive, but no sub-ms sleeps.
             while (self._last_video_time + self._allowed_lead) < ts_eff and not self._stopped:
-                await asyncio.sleep(0.001)
+                try:
+                    await asyncio.wait_for(self._video_tick.wait(), timeout=0.001)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    self._video_tick.clear()
 
-            self._last_audio_time_reported = ts_eff
+            # ★ NEW: soft catch-up burst if video ran far ahead of this frame's ts
+            # (Process current + a couple more frames immediately to close the gap)
+            def lead_amount() -> float:
+                return (self._last_video_time + self._allowed_lead) - ts_eff  # >0 means video ahead
 
-            # ---- NEW: zero-latency de-click / soft-clip (no timing changes) ----
+            burst = 0
+            while lead_amount() > self._catchup_high and burst < self._catchup_max:
+                # play current 'af' now
+                try:
+                    self._declick_inplace(af)
+                except Exception:
+                    pass
+                await self._audio_source.capture_frame(af)
+                self._last_audio_time_reported = ts_eff
+                self._audio_queue.task_done()
+                burst += 1
+
+                # pull next audio frame if available and update ts_eff
+                try:
+                    af, ts = self._audio_queue.get_nowait()
+                    ts_eff = (self._last_video_time + self._allowed_lead) if ts is None else float(ts)
+                except QueueEmpty:
+                    af = None
+                    break
+
+                if (self._last_video_time + self._allowed_lead) - ts_eff <= self._catchup_target:
+                    break
+
+            if af is None:
+                # nothing left after the burst
+                continue
+
+            # De-click / soft-clip (no timing change)
             try:
                 self._declick_inplace(af)
             except Exception:
-                # Fail-safe: never block playout if processing fails
                 pass
 
-            # Release to LiveKit
+            # Release to LiveKit (await required)
             await self._audio_source.capture_frame(af)
+            self._last_audio_time_reported = ts_eff
             self._audio_queue.task_done()
 
     async def aclose(self) -> None:
@@ -190,37 +244,26 @@ class GatedAVSynchronizerV2:
     def last_audio_time(self) -> float:
         return self._last_audio_time_reported
 
-    # ---- NEW: helpers for in-place transient suppression ----
+    # ---- in-place transient suppression (unchanged) ----
     def _declick_inplace(self, af: LKAudioFrame) -> None:
-        """
-        Causal, zero-latency smoothing:
-          - short crossfade from previous tail sample(s)
-          - gentle soft-clip for rare spikes
-        Works per frame; no extra buffering or delay.
-        """
-        # Try to access PCM as int16
         sr = int(getattr(af, "sample_rate", 16000))
         ch = int(getattr(af, "num_channels", 1))
 
         buf = getattr(af, "data", None)
         if buf is None:
-            # try alternate attribute names if SDK differs
             for alt in ("buffer", "buf", "pcm", "samples_bytes"):
                 buf = getattr(af, alt, None)
                 if buf is not None:
                     break
         if buf is None:
-            return  # nothing we can do safely
+            return
 
-        # Make a writable copy for processing
         arr = np.frombuffer(buf, dtype=np.int16).copy()
         if arr.size == 0:
             return
 
-        # Shape [num_frames, ch]
         if ch > 1:
             if arr.size % ch != 0:
-                # fallback: treat as mono
                 ch = 1
             frames = arr.size // ch
             x = arr.reshape(frames, ch).astype(np.float32)
@@ -228,10 +271,8 @@ class GatedAVSynchronizerV2:
             x = arr.astype(np.float32).reshape(-1, 1)
             frames = x.shape[0]
 
-        # 1) Boundary crossfade to remove clicks between frames
         xfade_len = max(1, min(int(sr * self._xfade_ms / 1000.0), frames))
         if self._prev_tail is None or self._prev_tail.shape[0] != x.shape[1]:
-            # initialize prev tail as first sample to avoid ramp from zero
             self._prev_tail = x[0, :].copy()
 
         if xfade_len > 1:
@@ -239,36 +280,28 @@ class GatedAVSynchronizerV2:
             head = x[:xfade_len, :]
             x[:xfade_len, :] = (1.0 - alphas) * self._prev_tail[None, :] + alphas * head
 
-        # 2) Gentle soft-clip to shave transients (very mild)
-        # scale to [-1,1], soft-clip, back to int16 range
         y = x / 32768.0
         s = float(self._softclip_strength)
         y = np.tanh(s * y) / np.tanh(s)
 
-        # update tail state for next frame
         self._prev_tail = y[-1, :].copy()
 
-        # write back
         y = (y * 32767.0).astype(np.int16)
         if ch > 1:
             y = y.reshape(-1)
         out_bytes = y.tobytes()
 
-        # Try to replace in-place; if not possible, set attribute
         try:
-            # attempt mutable view
             mv = memoryview(buf)
             if not mv.readonly and len(mv) == len(out_bytes):
-                mv[:] = out_bytes  # type: ignore[index]
+                mv[:] = out_bytes
                 return
         except Exception:
             pass
 
-        # Replace data attribute (common for dataclass-style frames)
         try:
             setattr(af, "data", out_bytes)
         except Exception:
-            # last resort: try common alt names
             for alt in ("buffer", "buf", "pcm", "samples_bytes"):
                 try:
                     setattr(af, alt, out_bytes)
