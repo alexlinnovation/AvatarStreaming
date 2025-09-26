@@ -71,11 +71,11 @@ const VOICE_OPTIONS: { label: string; value: string }[] = [
 /* -------------------- New: custom agent type -------------------- */
 type CustomAgent = {
   inputFile?: File | null;
-  localUrl?: string | null;        // for preview / fallback
-  serverPath?: string | null;      // path returned by API /upload
-  voice: string;                   // code
-  name: string;                    // display name (optional)
-  desc: string;                    // role/short (<=30 words)
+  localUrl?: string | null;
+  serverPath?: string | null;
+  voice: string;
+  name: string;
+  desc: string;
 };
 
 type StatusResp = {
@@ -160,7 +160,7 @@ export default function Playground({
     } catch {}
   }, []);
 
-  /* -------------------- New: upload helper (optional) -------------------- */
+  /* -------------------- New: upload helper -------------------- */
   const tryUploadToServer = useCallback(async (file: File): Promise<string | null> => {
     try {
       const fd = new FormData();
@@ -168,8 +168,8 @@ export default function Playground({
       const resp = await fetch(API_URL + "/upload", { method: "POST", body: fd });
       if (!resp.ok) throw new Error(`Upload http ${resp.status}`);
       const j = await resp.json();
-      if (j?.path) return j.path as string; // e.g., "static/yourfile.png"
-      return null;
+      // backend returns {server_path, public_url}
+      return (j?.public_url as string) || (j?.server_path ? `/${j.server_path}` : null);
     } catch (e) {
       console.warn("Upload failed or /upload not available. Falling back to local object URL.", e);
       return null;
@@ -180,14 +180,12 @@ export default function Playground({
   useEffect(() => {
     if (roomState === ConnectionState.Connected && name) {
       const sendOffer = async () => {
-        // if we have a custom agent pending, prefer it
         let input_image = selectedAgent?.input_image ?? "static/avatar.png";
         let voice = selectedAgent?.voice ?? "af_heart";
         let cname = selectedAgent?.name ?? "Assistant";
         let cdesc = selectedAgent?.desc ?? "Realtime assistant";
 
         if (pendingCustom) {
-          // if user uploaded, try to upload to server
           if (pendingCustom.inputFile) {
             const serverPath = await tryUploadToServer(pendingCustom.inputFile);
             if (serverPath) {
@@ -427,7 +425,6 @@ export default function Playground({
     if (!room) return;
 
     const onRoomDisconnected = () => {
-      // re-arm the audio gate for the next connection
       firstReadyBySound.current = false;
       setHasHeardAudio(false);
       setServerLoaded(false);
@@ -441,12 +438,9 @@ export default function Playground({
 
   // FIRST LOAD: unlock UI only when we detect real audio energy
   useEffect(() => {
-    // only run once, and only if we haven't already been marked ready
     if (firstReadyBySound.current) return;
     if (hasHeardAudio || serverLoaded) return;
 
-    // get underlying LK RemoteAudioTrack (from VoiceAssistant)
-    // NOTE: we don't rely on video at all here
     const lkTrack: any = voiceAssistant.audioTrack?.publication?.track;
     if (!lkTrack) return;
 
@@ -468,18 +462,14 @@ export default function Playground({
     };
 
     try {
-      // attach a hidden, muted <audio> so autoplay policies are happy
       audioEl = lkTrack.attach() as HTMLAudioElement;
       audioEl.muted = true;
-      // don't await: some browsers return a Promise that rejects during race
       audioEl.play().catch(() => {});
 
       const stream = (audioEl as any).srcObject as MediaStream | null;
       if (!stream) return cleanup;
 
-      // Analyser for real audio energy
       ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      // resume just in case
       ctx.resume?.().catch(() => {});
       src = ctx.createMediaStreamSource(stream);
       analyser = ctx.createAnalyser();
@@ -494,7 +484,6 @@ export default function Playground({
         for (let i = 0; i < buf.length; i++) e += buf[i] * buf[i];
         e /= buf.length;
 
-        // tiny, stable threshold to confirm sound is actually flowing
         if (e > 1e-5) {
           firstReadyBySound.current = true;
           setHasHeardAudio(true);
@@ -616,7 +605,6 @@ export default function Playground({
             })}
           </div>
 
-          {/* New: full-width button */}
           <button
             className="mt-4 w-full rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-white py-3 text-sm font-medium"
             onClick={() => setShowCreateModal(true)}
@@ -624,7 +612,6 @@ export default function Playground({
             Create your own agent
           </button>
 
-          {/* New: show a tiny pill if custom is armed */}
           {pendingCustom && (
             <div className="mt-2 text-xs text-gray-300">
               Using custom agent: <b>{pendingCustom.name || "Your Agent"}</b>{" "}
@@ -704,7 +691,6 @@ export default function Playground({
     const videoRef = useRef<HTMLVideoElement | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
 
-    // Enforce ≤30 words (trim on blur)
     const normalizeRole = (s: string) => {
       const words = s.trim().split(/\s+/).filter(Boolean);
       if (words.length <= 30) return s;
@@ -714,7 +700,6 @@ export default function Playground({
     useEffect(() => {
       return () => {
         if (previewUrl) URL.revokeObjectURL(previewUrl);
-        // stop any open camera when modal unmounts
         if (streamRef.current) {
           streamRef.current.getTracks().forEach((t) => t.stop());
           streamRef.current = null;
@@ -733,7 +718,6 @@ export default function Playground({
 
     const openCamera = async () => {
       try {
-        // close previous stream if any
         if (streamRef.current) {
           streamRef.current.getTracks().forEach((t) => t.stop());
         }
@@ -764,7 +748,6 @@ export default function Playground({
     const captureSelfie = async () => {
       const v = videoRef.current;
       if (!v) return;
-      // square-ish crop into PNG
       const w = v.videoWidth || 720;
       const h = v.videoHeight || 720;
       const size = Math.min(w, h);
@@ -772,12 +755,11 @@ export default function Playground({
       const sy = (h - size) / 2;
 
       const canvas = document.createElement("canvas");
-      canvas.width = 900; // good source res for the backend
+      canvas.width = 900;
       canvas.height = 900;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
-      // mirror like a selfie
       ctx.save();
       ctx.translate(canvas.width, 0);
       ctx.scale(-1, 1);
@@ -804,7 +786,6 @@ export default function Playground({
         name: nameInput.trim() || "Your Agent",
         desc: desc || "Custom realtime agent",
       });
-      // Clear preset selection (None)
       setSelectedAgent(null);
       setShowCreateModal(false);
     };
@@ -828,10 +809,8 @@ export default function Playground({
           </div>
 
           <div className="p-5 space-y-5">
-            {/* Top grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="rounded-lg overflow-hidden border border-gray-800 bg-black/40 h-72 md:h-80 flex items-center justify-center">
-                {/* Sample: Elenora image */}
                 <img src="/elenora.png" className="w-full h-full object-cover" alt="Sample" />
               </div>
               <div className="rounded-lg border border-gray-800 p-4 text-sm text-gray-300 leading-relaxed">
@@ -845,21 +824,20 @@ export default function Playground({
               </div>
             </div>
 
-            {/* Bottom grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-4">
                 <div className="space-y-3">
                   <label className="block text-sm text-gray-300">Upload .png/.jpg or .mp4</label>
                   <input
                     type="file"
-                    accept=".png,.jpg,.mp4"
+                    accept=".png,.jpg,.jpeg,.mp4"
                     onChange={(e) => onFile(e.target.files?.[0] || null)}
                     className="block w-full text-sm text-gray-200 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-gray-700 file:text-white hover:file:bg-gray-600"
                   />
                 </div>
 
-                {/* --- Selfie capture --- */}
-                {/* <div className="space-y-2">
+                {/* Selfie capture */}
+                <div className="space-y-2">
                   <label className="block text-sm text-gray-300">Or take a selfie</label>
                   {!camOpen ? (
                     <button
@@ -898,7 +876,7 @@ export default function Playground({
                       </p>
                     </div>
                   )}
-                </div> */}
+                </div>
 
                 {previewUrl && (
                   <div className="rounded-md overflow-hidden border border-gray-800">

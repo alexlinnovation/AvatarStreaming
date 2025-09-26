@@ -61,6 +61,38 @@ openai_client = AsyncOpenAI(api_key=OPEN_AI_KEY)
 _GLOBAL_AVATAR = None
 _chat_history: Dict[str, List[dict]] = {}
 
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+DATA_URL_RE = re.compile(r"^data:(image/(png|jpeg)|video/mp4);base64,(?P<b64>[A-Za-z0-9+/=]+)$")
+
+def _save_bytes_to_uploads(data: bytes, ext: str) -> str:
+    fname = f"{uuid.uuid4().hex}{ext}"
+    path = os.path.join(UPLOAD_DIR, fname)
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+def _materialize_input(src: str | None) -> str:
+    if not src:
+        return "static/avatar.png"
+    if os.path.exists(src):
+        return src
+    if src.startswith("/uploads/") and os.path.exists(src.lstrip("/")):
+        return src.lstrip("/")
+    m = DATA_URL_RE.match(src)
+    if m:
+        b = base64.b64decode(m.group("b64"))
+        if "video/mp4" in src:
+            return _save_bytes_to_uploads(b, ".mp4")
+        elif "image/png" in src:
+            return _save_bytes_to_uploads(b, ".png")
+        else:
+            return _save_bytes_to_uploads(b, ".jpg")
+    if src.startswith("blob:"):
+        raise HTTPException(400, "blob URLs are not supported; upload first")
+    return src
+
 class AvatarSession:
     def __init__(self, room: str, avatar_png: str, voice: str = "af_heart",
                  name: Optional[str] = "Alice", desc: Optional[str] = "Interview assistant"):
@@ -255,7 +287,7 @@ class AvatarSession:
                 chunk_size=CHUNK_SIZE,
             )
             self.sdk.online_mode = True
-            if self.avatar_png.lower().endswith(".png") or self.avatar_png.lower().endswith(".jpg"):
+            if self.avatar_png.lower().endswith(".png") or self.avatar_png.lower().endswith(".jpg") or self.avatar_png.lower().endswith(".jpeg"):
                 SAMPLING_TIMESTEP = SAMPLING_TIMESTEP_IMAGE
                 RESOLUTION = RESOLUTION_IMAGE
             else:
@@ -530,17 +562,28 @@ class StatusResp(BaseModel):
     loaded: bool
     room: Optional[str] = None
 
+@app.post("/upload")
+async def upload_endpoint(file: UploadFile = File(...)):
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in [".png", ".jpg", ".jpeg", ".mp4"]:
+        raise HTTPException(400, "unsupported file type")
+    data = await file.read()
+    server_path = _save_bytes_to_uploads(data, ext)
+    public_url = "/" + server_path.replace("\\", "/")
+    return {"server_path": server_path, "public_url": public_url}
+
 @app.post("/offer", response_model=OfferResp)
 async def offer_endpoint(req: OfferReq):
     global _GLOBAL_AVATAR, _chat_history
     req_room = req.room.strip()
     if not req_room:
         raise HTTPException(400, "room must not be empty")
+    safe_input = _materialize_input(req.input_image or "static/avatar.png")
 
     if _GLOBAL_AVATAR is None:
         _GLOBAL_AVATAR = AvatarSession(
             req_room,
-            req.input_image or "static/avatar.png",
+            safe_input,
             req.voice or "af_heart",
             req.name or "Assistant",
             req.desc or "Realtime assistant"
@@ -554,6 +597,7 @@ async def offer_endpoint(req: OfferReq):
         )
     else:
         _GLOBAL_AVATAR.room_name = req_room or _GLOBAL_AVATAR.room_name
+        _GLOBAL_AVATAR.avatar_png = safe_input or _GLOBAL_AVATAR.avatar_png
         if _GLOBAL_AVATAR.lk_room is None or not _GLOBAL_AVATAR.is_connected():
             await _GLOBAL_AVATAR.offer()
             if not _GLOBAL_AVATAR.first_greet_done:
@@ -611,10 +655,6 @@ async def token_endpoint(req: TokenReq) -> TokenResp:
             agents=[api.RoomAgentDispatch(agent_name=req.agentName)]
         )
     return TokenResp(accessToken=token.to_jwt())
-
-
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app.mount("/", StaticFiles(directory="frontend/out", html=True), name="frontend")
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
