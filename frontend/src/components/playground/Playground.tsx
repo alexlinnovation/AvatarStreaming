@@ -698,7 +698,11 @@ export default function Playground({
     };
 
     useEffect(() => {
+      // lock body scroll while modal is open
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
       return () => {
+        document.body.style.overflow = prev;
         if (previewUrl) URL.revokeObjectURL(previewUrl);
         if (streamRef.current) {
           streamRef.current.getTracks().forEach((t) => t.stop());
@@ -795,9 +799,11 @@ export default function Playground({
     };
 
     return (
-      <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
-        <div className="w-full max-w-3xl rounded-xl bg-gray-900 border border-gray-700 shadow-2xl">
-          <div className="p-5 border-b border-gray-800 flex items-center justify-between">
+      <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-0 md:p-4">
+        {/* Modal container: full height on mobile, scroll within body area */}
+        <div className="w-full max-w-3xl h-screen md:h-auto md:max-h-[85vh] md:rounded-xl bg-gray-900 border border-gray-700 shadow-2xl overflow-hidden flex flex-col">
+          {/* Header sticks to top */}
+          <div className="p-5 border-b border-gray-800 flex items-center justify-between shrink-0 bg-gray-900">
             <h3 className="text-white font-semibold">Create your own agent</h3>
             <button
               className="text-gray-400 hover:text-gray-200"
@@ -808,9 +814,10 @@ export default function Playground({
             </button>
           </div>
 
-          <div className="p-5 space-y-5">
+          {/* Scrollable content */}
+          <div className="p-5 space-y-5 overflow-y-auto overscroll-contain flex-1">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="rounded-lg overflow-hidden border border-gray-800 bg-black/40 h-72 md:h-80 flex items-center justify-center">
+              <div className="rounded-lg overflow-hidden border border-gray-800 bg-black/40 h-64 sm:h-72 md:h-80 flex items-center justify-center">
                 <img src="/elenora.png" className="w-full h-full object-cover" alt="Sample" />
               </div>
               <div className="rounded-lg border border-gray-800 p-4 text-sm text-gray-300 leading-relaxed">
@@ -857,7 +864,7 @@ export default function Playground({
                           className="w-full h-64 object-cover transform -scale-x-100 bg-black"
                         />
                       </div>
-                      <div className="flex gap-2">
+                      <div className="flex flex-col sm:flex-row gap-2">
                         <button
                           onClick={captureSelfie}
                           className="rounded-md px-4 py-2 bg-violet-600 hover:bg-violet-500 text-white text-sm"
@@ -904,7 +911,7 @@ export default function Playground({
                   value={role}
                   onChange={(e) => setRole(e.target.value)}
                   onBlur={(e) => setRole(normalizeRole(e.target.value))}
-                  className="w-full rounded-md border border-gray-700 bg-gray-800 text-white p-2 text-sm h-20"
+                  className="w-full rounded-md border border-gray-700 bg-gray-800 text-white p-2 text-sm h-24"
                   placeholder="e.g., Friendly customer support for HRIS product"
                 />
 
@@ -924,7 +931,8 @@ export default function Playground({
             </div>
           </div>
 
-          <div className="p-5 border-t border-gray-800 flex items-center justify-end gap-3">
+          {/* Footer sticks to bottom */}
+          <div className="p-5 border-t border-gray-800 flex items-center justify-end gap-3 shrink-0 bg-gray-900">
             <button
               onClick={cancel}
               className="rounded-md px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm border border-gray-700"
@@ -942,6 +950,7 @@ export default function Playground({
       </div>
     );
   };
+
 
 
   /* -------------------- Layout / tabs -------------------- */
