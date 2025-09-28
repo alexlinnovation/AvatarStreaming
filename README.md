@@ -7,7 +7,7 @@
 A full-stack application for real-time talking head synthesis with a Next.js frontend and Python backend powered by TensorRT inference.
 
 ## Project Structure
-
+```text
 ROOT DIRECTORY/
 ├── frontend/                    (Next.js frontend application)
 │   ├── src/                    (Source code)
@@ -41,6 +41,7 @@ ROOT DIRECTORY/
 ├── README.md                   (This file)
 ├── requirements.txt            (Python dependencies)
 └── tsconfig.json               (TypeScript config)
+```
 
 ## 🛠️ Installation
 
@@ -119,14 +120,6 @@ cd frontend
 npm install
 npm run dev
 
-## 📚 Citation
-If you find this codebase useful for your research, please use the following entry.
-@article{li2024ditto,
-    title={Ditto: Motion-Space Diffusion for Controllable Realtime Talking Head Synthesis},
-    author={Li, Tianqi and Zheng, Ruobing and Yang, Minghui and Chen, Jingdong and Yang, Ming},
-    journal={arXiv preprint arXiv:2411.19509},
-    year={2024}
-}
 
 ### Conda
 Create `conda` environment:
