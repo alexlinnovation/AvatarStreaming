@@ -6,42 +6,41 @@
 
 A full-stack application for real-time talking head synthesis with a Next.js frontend and Python backend powered by TensorRT inference.
 
-## 📁 Project Structure
+## Project Structure
 
-frontend/                 # Next.js frontend application
-├── src/                 # Source code
-├── pages/               # Next.js pages
-├── styles/              # Styling files
-├── transcriptions/      # Transcription files
-├── env/                 # Environment configurations
-├── package.json         # Frontend dependencies
-└── ...                  
-
-src/                     # Python backend
-├── __pvcache__/         # Cache directory
-├── static/              # Static files
-├── tests/               # Test files
-├── uploads/             # Upload directory
-├── app.py               # Main application
-├── inference.py         # Inference logic
-├── livekit_video.py     # LiveKit integration
-├── livekit_video_keepalive.py  # Keepalive service
-└── ...
-
-scripts/                 # Utility scripts
-├── gated_avsync.py      # Audio-video sync
-├── gated_avsyncv2.py    # Enhanced AV sync
-├── qwen.py              # Qwen model integration
-└── utils.py             # Utility functions
-
-.env.example            # Environment template
-.eslintrc.json          # ESLint configuration
-.gitignore              # Git ignore rules
-Dockerfile              # Docker configuration
-package.json            # Project dependencies
-README.md               # This file
-requirements.txt        # Python dependencies
-tsconfig.json           # TypeScript config
+ROOT DIRECTORY/
+├── frontend/                    (Next.js frontend application)
+│   ├── src/                    (Source code)
+│   ├── pages/                  (Next.js pages)
+│   ├── styles/                 (Styling files)
+│   ├── transcriptions/         (Transcription files)
+│   ├── env/                    (Environment configurations)
+│   └── package.json            (Frontend dependencies)
+│
+├── src/                        (Python backend)
+│   ├── __pvcache__/            (Cache directory)
+│   ├── static/                 (Static files)
+│   ├── tests/                  (Test files)
+│   ├── uploads/                (Upload directory)
+│   ├── app.py                  (Main application)
+│   ├── inference.py            (Inference logic)
+│   ├── livekit_video.py        (LiveKit integration)
+│   └── livekit_video_keepalive.py (Keepalive service)
+│
+├── scripts/                    (Utility scripts)
+│   ├── gated_avsync.py         (Audio-video sync)
+│   ├── gated_avsyncv2.py       (Enhanced AV sync)
+│   ├── qwen.py                 (Qwen model integration)
+│   └── utils.py                (Utility functions)
+│
+├── .env.example                (Environment template)
+├── .eslintrc.json              (ESLint configuration)
+├── .gitignore                  (Git ignore rules)
+├── Dockerfile                  (Docker configuration)
+├── package.json                (Project dependencies)
+├── README.md                   (This file)
+├── requirements.txt            (Python dependencies)
+└── tsconfig.json               (TypeScript config)
 
 ## 🛠️ Installation
 
